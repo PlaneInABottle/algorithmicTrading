@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import inspect
 import os
 from dataclasses import replace
 from datetime import timedelta
@@ -93,6 +94,33 @@ def test_low_disk_preflight_writes_nothing_and_preserves_committed_data(tmp_path
         assert not list((tmp_path / "archive").rglob("*.parquet"))
 
 
+def test_dynamic_headroom_includes_projected_temp_wal_and_publication_needs(
+    tmp_path: Path,
+) -> None:
+    with seeded_store(tmp_path) as store:
+        probe = ArchiveCompactor(tmp_path, store, min_free_bytes=0)
+        projection = probe.projected_headroom()
+        assert projection.projected_temp_bytes > 0
+        assert projection.projected_wal_bytes > 0
+        assert projection.required_bytes >= 2 * (
+            projection.projected_temp_bytes + projection.projected_wal_bytes
+        )
+
+        guarded = ArchiveCompactor(
+            tmp_path,
+            store,
+            min_free_bytes=0,
+            free_bytes=lambda _: projection.required_bytes - 1,
+        )
+        with pytest.raises(LowDiskError, match="dynamic headroom"):
+            guarded.compact_all()
+        assert store.manifest_count() == 0
+
+
+def test_compact_all_has_no_dead_force_rewrite_api() -> None:
+    assert "force_rewrite" not in inspect.signature(ArchiveCompactor.compact_all).parameters
+
+
 def test_mocked_enospc_preserves_existing_active_partition(tmp_path: Path) -> None:
     with seeded_store(tmp_path) as store:
         compactor = ArchiveCompactor(tmp_path, store)
@@ -118,7 +146,7 @@ def test_read_only_partition_directory_preserves_committed_data(tmp_path: Path) 
         partition.chmod(0o500)
         try:
             with pytest.raises(PublicationError):
-                compactor.compact_all(force_rewrite=True)
+                compactor.compact_all()
         finally:
             partition.chmod(0o700)
         assert active.path.read_bytes()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -10,6 +11,8 @@ import pytest
 
 from bist_minute_collector.models import FetchResult, OutcomeCode, ProviderOutcome
 from bist_minute_collector.store import (
+    MIGRATION_V1,
+    SCHEMA_VERSION,
     CursorUpdate,
     IngestEnvelope,
     ProvenanceConflictError,
@@ -193,10 +196,10 @@ def test_sqlite_uniqueness_wal_reopen_rollback_and_quick_check(tmp_path: Path) -
     with WriterStore(tmp_path) as reopened:
         assert reopened.active_bar_count() == 1
         assert reopened.quick_check() == "ok"
-        assert reopened.schema_version() == 1
-        assert reopened.migration_count() == 1
+        assert reopened.schema_version() == SCHEMA_VERSION == 3
+        assert reopened.migration_count() == 3
         reopened.apply_migrations()
-        assert reopened.migration_count() == 1
+        assert reopened.migration_count() == 3
         with pytest.raises(WriterAlreadyOpenError):
             WriterStore(tmp_path)
 
@@ -223,9 +226,42 @@ def test_version_zero_database_upgrades_additively_and_reader_does_not_mutate(
         signature_before = store.schema_signature()
     with WriterStore.open_reader(tmp_path) as reader:
         assert reader.quick_check() == "ok"
+        assert reader.integer_scalar("PRAGMA busy_timeout") == 5_000
         assert reader.schema_signature() == signature_before
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             reader.scalar("DELETE FROM bars_hot")
+
+
+def test_version_one_database_upgrades_additively_and_repeatably(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    database = state / "collector.sqlite3"
+    connection = sqlite3.connect(database)
+    connection.executescript(MIGRATION_V1)
+    connection.execute(
+        "INSERT INTO schema_migrations VALUES (1, ?, ?)",
+        ("2026-08-03T00:00:00Z", hashlib.sha256(MIGRATION_V1.encode()).hexdigest()),
+    )
+    connection.execute("CREATE TABLE phase_one_sentinel (value TEXT NOT NULL)")
+    connection.execute("INSERT INTO phase_one_sentinel VALUES ('preserve-v1')")
+    connection.execute("PRAGMA user_version=1")
+    connection.commit()
+    connection.close()
+
+    with WriterStore(tmp_path) as upgraded:
+        assert upgraded.schema_version() == 3
+        assert upgraded.migration_count() == 3
+        assert upgraded.scalar("SELECT value FROM phase_one_sentinel") == "preserve-v1"
+        assert (
+            upgraded.scalar(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name='request_attempts'"
+            )
+            == "request_attempts"
+        )
+        signature = upgraded.schema_signature()
+        upgraded.apply_migrations()
+        assert upgraded.schema_signature() == signature
+        assert upgraded.migration_count() == 3
 
 
 def test_retention_prunes_ordinary_bodies_but_never_anomaly_or_correction(

@@ -1,7 +1,7 @@
 # Durable BIST 50 One-Minute Collector — Implementation Plan
 
 Verification date: **2026-08-03 (Europe/Istanbul)**
-Status: **Phases 1 and 2 implemented and reviewed; Phase 3 and later phases are not authorized**
+Status: **Phases 1–3 implemented and reviewed; Phase 4 and later phases are not authorized**
 Scope: current BIST 50 constituents, Yahoo one-minute data as a bounded free research source, and a provider-neutral path to licensed data later.
 
 This is the canonical implementation plan for the minute-data collector. It complements the broader [BIST backfill/backtest research](../../BIST_BACKTEST_SYSTEM_RESEARCH.md); it does not change that report's conclusions about data rights, historical depth, or evidentiary limits.
@@ -19,7 +19,7 @@ This is the canonical implementation plan for the minute-data collector. It comp
 
 **[V/T] This design can continuously preserve one-minute observations that Yahoo currently returns, survive process and machine restarts, recover recent gaps while the provider still retains them, and record older gaps truthfully. It cannot guarantee complete exchange data, infer trades from empty provider rows, or recover data that has rolled out of Yahoo's window.** Yahoo is an unofficial personal-research source with no completeness or uptime guarantee.
 
-Phase 1 and Phase 2 implementation were separately authorized and completed as recorded in §13. Phase 3 and every later implementation action remain behind an explicit user decision; no persistent collector, credentials, service, or continuous process exists.
+Phase 1, Phase 2, and Phase 3 implementation were separately authorized and completed as recorded in §13. Phase 4 and every later implementation action remain behind an explicit user decision; no persistent collector, credentials, service, or continuous process exists.
 
 ## 2. Measured environment and provider facts
 
@@ -27,7 +27,7 @@ Phase 1 and Phase 2 implementation were separately authorized and completed as r
 
 | Item | Evidence on 2026-08-03 | Consequence |
 |---|---|---|
-| Workspace | **[T]** The directory contained only `BIST_BACKTEST_SYSTEM_RESEARCH.md` before this planning work and was not a Git repository. | Phase 1 authorization later satisfied this prerequisite locally on `main`; no staging, commit, remote, or push followed. |
+| Workspace | **[T]** The directory contained only `BIST_BACKTEST_SYSTEM_RESEARCH.md` before this planning work and was not a Git repository. | Phase 1 authorization later satisfied this prerequisite locally on `main`; the verified Phase 1–2 foundation is local commit `d098be5`, and Phase 3 has its own authorized local phase-boundary commit. No remote or push exists. |
 | Python tooling | **[T]** `uv 0.5.9` and `/usr/bin/python3.12` (Python 3.12.3) are available; the current bare `python3` resolves to Python 3.11.15. | Pin Python 3.12 in `.python-version` and `pyproject.toml`; every entrypoint uses the uv virtual environment, never bare `python3`. |
 | User systemd | **[T]** `systemctl --user is-system-running` returned `running`; systemd is 255. | A user service can supervise the collector without root. |
 | Boot persistence | **[T]** `loginctl show-user mirza` returned `Linger=yes`. | An enabled user unit can start at boot without an interactive login. This still requires an actual reboot acceptance test. |
@@ -604,6 +604,8 @@ uv run bist-minute-collector collect-once --symbols ASELS.IS,THYAO.IS
 
 **Stop gate:** fail if concurrency/caps can be bypassed, duplicate processes can write, a cancellation advances cursors, or real bounded requests cannot be fully accounted.
 
+**Implementation evidence (2026-08-03):** Phase 3 completed strict RED → GREEN → REFACTOR. The exact scheduler/backoff suite passed 11 tests; the collector/process suite passed 12; the final offline suite passed 102 tests with one opt-in network test deselected. Real subprocess tests cover writer exclusion, SIGTERM cancellation, and SIGKILL transaction rollback. A fresh bounded Yahoo foreground check made exactly two requests (`ASELS.IS`, `THYAO.IS`), recorded two terminal successes, 964 bars, two cursors, zero nonterminal attempts, maximum fetch concurrency two, and maximum writer concurrency one before its task-owned root was removed from `/tmp`. The implementation review initially returned **REVISE** for a permanent schema-drift pause; additive schema v3 introduced a durable 30-minute expiry, and the one permitted focused same-session confirmation returned **APPROVE** with no remaining Critical, High, or Medium findings. Full evidence and dispositions are linked in §13.
+
 ### Phase 4 — Gap detection, calendar, and restart/offline recovery
 
 **RED tests**
@@ -751,11 +753,11 @@ systemctl --user is-enabled bist-minute-collector.service
 4. **[U] Calendar/suspensions:** Phase 1 froze the sourced current 2026 schedule and holiday transcription, but symbol-level suspensions and historical calendar/rule states still require later official-source work.
 5. **[U] Boot evidence:** `Linger=yes` and unit semantics support boot resume, but only an actual reboot proves this machine's end-to-end behavior.
 6. **[U] Long observation:** weeks-long uptime, natural 429/outage/correction behavior, and holiday/half-day behavior cannot be established in this planning turn.
-7. **[A] Git and service actions:** local initialization is complete; staging, commits, unit installation, enablement, continuous start, remotes, and push are distinct future approvals.
+7. **[A] Git and service actions:** local initialization and the authorized phase-boundary commits are complete. Unit installation, enablement, continuous start, remotes, merge, and push remain distinct future approvals.
 
 ### Next implementation gate
 
-Phases 1 and 2 are complete. There is no authorized next implementation command. The next gate is an explicit user decision authorizing **Phase 3 RED tests** for scheduler single-cycle behavior, bounded concurrency, overlapping idempotent fetches, persisted retry/circuit state, and `collect-once`. Scheduling implementation, staging, commits, service work, and all later phases remain stopped until that decision.
+Phases 1–3 are complete. There is no authorized next implementation command. The next gate is an explicit user decision authorizing **Phase 4 RED tests** for calendar/session classification, append-only gap states, bounded recent recovery, and truthful beyond-retention evidence. The first planned command is `uv run pytest tests/unit/test_calendar.py tests/unit/test_gaps.py -q`; it has not been run. Gap recovery, service work, persistent collection, remotes, merge, and push remain stopped until that decision.
 
 ## 12. Source register
 
@@ -785,6 +787,8 @@ The required read-only OpenCode review was completed in exact session `ses_03834
 
 The [full review](../reviews/bist-minute-collector-opencode-review.md), [focused confirmation](../reviews/bist-minute-collector-opencode-confirmation.md), and [finding disposition](../reviews/bist-minute-collector-review-disposition.md) are retained as planning artifacts. That planning-review gate was later satisfied for Phase 1 only; no persistent collector, service, credentials, or continuous process has been created.
 
-**Implementation status (2026-08-03):** the user separately authorized and completed Phase 1 and Phase 2. A local Git repository was initialized on `main` without staging or committing. Phase 1 provider/universe contracts and Phase 2 crash-safe storage/provenance/revision/Parquet contracts each completed strict RED → GREEN → REFACTOR and received a same-session DeepSeek Flash implementation verdict of **APPROVE**, with no Critical, High, or Medium findings.
+**Implementation status (2026-08-03):** the user separately authorized and completed Phases 1–3. A local Git repository was initialized on `main`. The verified Phase 1–2 foundation is commit `d098be5`; Phase 3 is kept in its own authorized local phase-boundary commit. Phase 1 provider/universe contracts and Phase 2 crash-safe storage/provenance/revision/Parquet contracts each completed strict RED → GREEN → REFACTOR and received a same-session DeepSeek Flash implementation verdict of **APPROVE**, with no Critical, High, or Medium findings.
 
-The [full Phase 1 review](../reviews/bist-minute-collector-phase1-opencode-review.md), [Phase 1 disposition](../reviews/bist-minute-collector-phase1-review-disposition.md), [full Phase 2 review](../reviews/bist-minute-collector-phase2-opencode-review.md), [Phase 2 disposition](../reviews/bist-minute-collector-phase2-review-disposition.md), and [Phase 2 RED/GREEN evidence](../reviews/bist-minute-collector-phase2-red-green-evidence.md) are retained. No focused Phase 2 confirmation was requested because only Low findings were fixed, while the user's confirmation condition applies only to Critical, High, or Medium fixes. Phase 3 and every later phase remain unauthorized. The next gate is an explicit user decision authorizing Phase 3 RED tests; no service, credentials, persistent collector, broker connection, remote, staging, commit, or push is authorized.
+The [full Phase 1 review](../reviews/bist-minute-collector-phase1-opencode-review.md), [Phase 1 disposition](../reviews/bist-minute-collector-phase1-review-disposition.md), [full Phase 2 review](../reviews/bist-minute-collector-phase2-opencode-review.md), [Phase 2 disposition](../reviews/bist-minute-collector-phase2-review-disposition.md), and [Phase 2 RED/GREEN evidence](../reviews/bist-minute-collector-phase2-red-green-evidence.md) are retained. No focused Phase 2 confirmation was requested because only Low findings were fixed, while the user's confirmation condition applies only to Critical, High, or Medium fixes.
+
+The [full Phase 3 review](../reviews/bist-minute-collector-phase3-opencode-review.md) returned **REVISE** with one Medium and six Low findings. M1 and L1 were fixed test-first; all findings are reconciled in the [Phase 3 disposition](../reviews/bist-minute-collector-phase3-review-disposition.md). Because M1 required a fix, the single permitted [focused Phase 3 confirmation](../reviews/bist-minute-collector-phase3-opencode-confirmation.md) ran in the same session/model/agent and returned **APPROVE**, explicitly with no remaining Critical, High, or Medium finding. The [Phase 3 RED/GREEN evidence](../reviews/bist-minute-collector-phase3-red-green-evidence.md) records the exact gates and bounded live request accounting. Phase 4 and every later phase remain unauthorized; no service, credentials, persistent collector, broker connection, remote, merge, or push exists.

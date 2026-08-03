@@ -7,6 +7,7 @@ import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -49,6 +50,15 @@ class PublishedPartition:
 class ReconcileReport:
     recovered: int = 0
     failed: int = 0
+    cleaned_failed_temps: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class HeadroomProjection:
+    projected_temp_bytes: int
+    projected_wal_bytes: int
+    projected_publication_bytes: int
+    required_bytes: int
 
 
 PARQUET_SCHEMA = pa.schema(
@@ -157,16 +167,25 @@ class ArchiveCompactor:
         free_bytes: FreeBytesProbe = _default_free_bytes,
         min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
         fault_injector: FaultInjector | None = None,
+        failed_temp_retention: timedelta = timedelta(days=7),
+        max_failed_temp_files: int = 64,
+        utc_now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
+        if min_free_bytes < 0:
+            raise ValueError("min_free_bytes must be nonnegative")
+        if failed_temp_retention < timedelta(0) or max_failed_temp_files < 0:
+            raise ValueError("failed-temp retention and cap must be nonnegative")
         self.data_root = Path(data_root).resolve()
         self.archive_root = self.data_root / "archive"
         self.store = store
         self._free_bytes = free_bytes
         self._min_free_bytes = min_free_bytes
         self._fault = fault_injector or (lambda _point: None)
+        self._failed_temp_retention = failed_temp_retention
+        self._max_failed_temp_files = max_failed_temp_files
+        self._utc_now = utc_now
 
-    def compact_all(self, *, force_rewrite: bool = False) -> tuple[PublishedPartition, ...]:
-        del force_rewrite
+    def compact_all(self) -> tuple[PublishedPartition, ...]:
         keys = sorted(
             {
                 (
@@ -184,10 +203,35 @@ class ArchiveCompactor:
 
     def _guard_space(self) -> None:
         available = self._free_bytes(self.data_root)
-        if available < self._min_free_bytes:
+        projection = self.projected_headroom()
+        required = max(self._min_free_bytes, projection.required_bytes)
+        if available < required:
             raise LowDiskError(
-                f"free space {available} is below compaction floor {self._min_free_bytes}"
+                f"free space {available} is below dynamic headroom {required} "
+                f"(absolute floor {self._min_free_bytes})"
             )
+
+    def projected_headroom(self) -> HeadroomProjection:
+        projected_temp = max(1 * 1024 * 1024, self.store.active_bar_count() * 512)
+        database_bytes = (
+            self.store.database_path.stat().st_size if self.store.database_path.exists() else 0
+        )
+        wal = self.store.database_path.with_name(f"{self.store.database_path.name}-wal")
+        current_wal_bytes = wal.stat().st_size if wal.exists() else 0
+        projected_wal = max(4 * 1024 * 1024, database_bytes + current_wal_bytes)
+        active_sizes = [
+            (self.data_root / manifest.final_path).stat().st_size
+            for manifest in self.store.active_manifests()
+            if manifest.final_path is not None and (self.data_root / manifest.final_path).is_file()
+        ]
+        projected_publication = max([projected_temp, *active_sizes])
+        required = 2 * (projected_temp + projected_wal + projected_publication)
+        return HeadroomProjection(
+            projected_temp,
+            projected_wal,
+            projected_publication,
+            required,
+        )
 
     def _compact_partition(
         self, source: str, interval_seconds: int, session_date: str
@@ -271,7 +315,45 @@ class ArchiveCompactor:
                     manifest.attempt_id, f"{error.__class__.__name__}: {error}"
                 )
                 failed += 1
-        return ReconcileReport(recovered, failed)
+        cleaned = self._cleanup_failed_temps()
+        return ReconcileReport(recovered, failed, cleaned)
+
+    def _cleanup_failed_temps(self) -> int:
+        now = self._utc_now()
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("utc_now must return timezone-aware UTC")
+        candidates: list[tuple[float, StoredManifest, Path]] = []
+        archive_root = self.archive_root.resolve()
+        for manifest in self.store.manifests(("failed",)):
+            if manifest.temp_removed_at_utc is not None:
+                continue
+            temp = (self.data_root / manifest.temp_path).resolve()
+            if (
+                not temp.is_file()
+                or not temp.is_relative_to(archive_root)
+                or not temp.name.startswith(".")
+                or not temp.name.endswith(".parquet.tmp")
+            ):
+                continue
+            candidates.append((temp.stat().st_mtime, manifest, temp))
+        candidates.sort(key=lambda item: (item[0], item[1].attempt_id))
+        overflow = max(0, len(candidates) - self._max_failed_temp_files)
+        cutoff = (now - self._failed_temp_retention).timestamp()
+        cleaned = 0
+        for index, (modified_at, manifest, temp) in enumerate(candidates):
+            if index >= overflow and modified_at > cutoff:
+                continue
+            try:
+                temp.unlink()
+            except OSError:
+                continue
+            self.store.mark_manifest_temp_removed(
+                manifest.attempt_id,
+                now.astimezone(UTC),
+                "failed-temp-retention-policy",
+            )
+            cleaned += 1
+        return cleaned
 
     def _reconcile_manifest(self, manifest: StoredManifest) -> None:
         temp = self.data_root / manifest.temp_path

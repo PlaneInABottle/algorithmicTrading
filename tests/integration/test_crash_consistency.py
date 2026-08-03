@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -72,7 +74,7 @@ def test_corrupt_pending_publication_fails_closed_and_preserves_prior_active(
                 raise RuntimeError("leave pending")
 
         with pytest.raises(RuntimeError, match="leave pending"):
-            ArchiveCompactor(tmp_path, store, fault_injector=kill).compact_all(force_rewrite=True)
+            ArchiveCompactor(tmp_path, store, fault_injector=kill).compact_all()
         pending = store.pending_manifests()[0]
         temp = tmp_path / pending.temp_path
         if corruption == "truncated":
@@ -87,3 +89,46 @@ def test_corrupt_pending_publication_fails_closed_and_preserves_prior_active(
         assert original.path.read_bytes()
         assert temp.exists()
         assert reopened.quick_check() == "ok"
+
+
+def test_failed_temp_retention_is_bounded_accounted_and_preserves_active_evidence(
+    tmp_path: Path,
+) -> None:
+    seed(tmp_path)
+    fixed_now = datetime(2026, 8, 20, tzinfo=UTC)
+    with WriterStore(tmp_path) as store:
+        original = ArchiveCompactor(tmp_path, store).compact_all()[0]
+        temp_paths: list[Path] = []
+        for index in range(2):
+            temp = tmp_path / "archive" / f".failed-{index}.parquet.tmp"
+            temp.parent.mkdir(parents=True, exist_ok=True)
+            temp.write_bytes(f"failed-{index}".encode())
+            old_timestamp = (fixed_now - timedelta(days=8, minutes=index)).timestamp()
+            os.utime(temp, (old_timestamp, old_timestamp))
+            attempt_id = f"failed-{index}"
+            store.create_manifest(
+                attempt_id,
+                "yahoo-chart",
+                60,
+                "2026-08-03",
+                temp.relative_to(tmp_path).as_posix(),
+            )
+            store.fail_manifest(attempt_id, "synthetic retained failure")
+            temp_paths.append(temp)
+
+        report = ArchiveCompactor(
+            tmp_path,
+            store,
+            failed_temp_retention=timedelta(days=7),
+            max_failed_temp_files=1,
+            utc_now=lambda: fixed_now,
+        ).reconcile()
+
+        assert report.cleaned_failed_temps == 2
+        assert not any(path.exists() for path in temp_paths)
+        failed = store.manifests(("failed",))
+        assert len(failed) == 2
+        assert all(item.temp_removed_at_utc == fixed_now for item in failed)
+        assert all(item.temp_removal_reason == "failed-temp-retention-policy" for item in failed)
+        assert original.path.is_file()
+        assert store.active_partition_hashes() == [original.content_sha256]

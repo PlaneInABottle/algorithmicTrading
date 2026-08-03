@@ -416,10 +416,19 @@ def _transport_result(
 class YahooChartProvider:
     """Unofficial personal-research adapter; no completeness, retention, or SLA claim."""
 
+    source = "yahoo_chart"
+
     def __init__(self, *, timeout_seconds: float = 15.0) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._timeout_seconds = timeout_seconds
+
+    async def fetch_one(self, symbol: str, window: RequestWindow) -> FetchResult:
+        """Fetch one bounded day; the result truthfully labels Yahoo's approximate range window."""
+
+        del window
+        batch = await self.fetch_many_one_day((symbol,), max_concurrency=1)
+        return batch.results[0]
 
     async def fetch_many_one_day(
         self, symbols: Sequence[str], *, max_concurrency: int

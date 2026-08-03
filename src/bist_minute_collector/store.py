@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from .models import FetchResult, MinuteBar, OutcomeCode
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 FaultInjector = Callable[[str], None]
 
 
@@ -114,6 +114,25 @@ class StoredManifest:
     content_sha256: str | None
     row_count: int | None
     error: str | None
+    temp_removed_at_utc: datetime | None
+    temp_removal_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RequestReservation:
+    allowed: bool
+    reason: str
+    attempt_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredProviderRuntime:
+    source: str
+    cooldown_until_utc: datetime | None
+    circuit_open_until_utc: datetime | None
+    throttle_streak: int
+    paused_reason: str | None
+    paused_until_utc: datetime | None
 
 
 def _utc_text(value: datetime) -> str:
@@ -347,6 +366,48 @@ CREATE INDEX IF NOT EXISTS bars_hot_by_partition
 ON bars_hot(source, interval_seconds, bar_open_utc, exchange_code);
 """
 
+MIGRATION_V2 = """
+CREATE TABLE IF NOT EXISTS provider_runtime_state (
+    source TEXT PRIMARY KEY,
+    cooldown_until_utc TEXT,
+    circuit_open_until_utc TEXT,
+    throttle_streak INTEGER NOT NULL DEFAULT 0 CHECK (throttle_streak >= 0),
+    paused_reason TEXT,
+    updated_at_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS request_attempts (
+    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL,
+    provider_symbol TEXT NOT NULL,
+    attempted_at_utc TEXT NOT NULL,
+    attempted_at_epoch_us INTEGER NOT NULL,
+    session_date TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('started','completed','cancelled')),
+    outcome_code TEXT,
+    completed_at_utc TEXT
+);
+CREATE INDEX IF NOT EXISTS request_attempts_budget
+ON request_attempts(source, attempted_at_epoch_us, session_date);
+CREATE INDEX IF NOT EXISTS request_attempts_outcome
+ON request_attempts(source, outcome_code, attempted_at_epoch_us);
+CREATE TABLE IF NOT EXISTS provider_schema_drift (
+    source TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    provider_symbol TEXT NOT NULL,
+    observed_at_utc TEXT NOT NULL,
+    PRIMARY KEY (source, signature, provider_symbol)
+);
+ALTER TABLE compaction_manifests ADD COLUMN temp_removed_at_utc TEXT;
+ALTER TABLE compaction_manifests ADD COLUMN temp_removal_reason TEXT;
+"""
+
+MIGRATION_V3 = """
+ALTER TABLE provider_runtime_state ADD COLUMN paused_until_utc TEXT;
+"""
+
+MIGRATIONS = {1: MIGRATION_V1, 2: MIGRATION_V2, 3: MIGRATION_V3}
+
 
 def _migration_statements(sql: str) -> Iterator[str]:
     statement = ""
@@ -367,6 +428,7 @@ class StoreReader(AbstractContextManager["StoreReader"]):
         uri = f"file:{database_path.as_posix()}?mode=ro"
         self._connection = sqlite3.connect(uri, uri=True)
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA busy_timeout=5000")
         self._connection.execute("PRAGMA query_only=ON")
 
     def __enter__(self) -> Self:
@@ -453,23 +515,23 @@ class WriterStore(StoreReader):
         current = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
         if current > SCHEMA_VERSION:
             raise StoreError(f"database schema {current} is newer than supported {SCHEMA_VERSION}")
-        if current == SCHEMA_VERSION:
-            return
-        checksum = hashlib.sha256(MIGRATION_V1.encode()).hexdigest()
-        self._connection.execute("BEGIN EXCLUSIVE")
-        try:
-            for statement in _migration_statements(MIGRATION_V1):
-                self._connection.execute(statement)
-            self._connection.execute(
-                "INSERT INTO schema_migrations(version, applied_at_utc, migration_sha256) "
-                "VALUES (?, ?, ?)",
-                (1, _utc_text(datetime.now(UTC)), checksum),
-            )
-            self._connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            self._connection.commit()
-        except BaseException:
-            self._connection.rollback()
-            raise
+        for version in range(current + 1, SCHEMA_VERSION + 1):
+            migration = MIGRATIONS[version]
+            checksum = hashlib.sha256(migration.encode()).hexdigest()
+            self._connection.execute("BEGIN EXCLUSIVE")
+            try:
+                for statement in _migration_statements(migration):
+                    self._connection.execute(statement)
+                self._connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at_utc, migration_sha256) "
+                    "VALUES (?, ?, ?)",
+                    (version, _utc_text(datetime.now(UTC)), checksum),
+                )
+                self._connection.execute(f"PRAGMA user_version={version}")
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
 
     def schema_version(self) -> int:
         return self.integer_scalar("PRAGMA user_version")
@@ -479,6 +541,218 @@ class WriterStore(StoreReader):
 
     def journal_mode(self) -> str:
         return str(self.scalar("PRAGMA journal_mode"))
+
+    def provider_runtime(self, source: str) -> StoredProviderRuntime:
+        row = self._connection.execute(
+            "SELECT * FROM provider_runtime_state WHERE source=?", (source,)
+        ).fetchone()
+        if row is None:
+            return StoredProviderRuntime(source, None, None, 0, None, None)
+        cooldown = row["cooldown_until_utc"]
+        circuit = row["circuit_open_until_utc"]
+        paused_until = row["paused_until_utc"]
+        return StoredProviderRuntime(
+            source=str(row["source"]),
+            cooldown_until_utc=(_from_utc_text(str(cooldown)) if cooldown is not None else None),
+            circuit_open_until_utc=(_from_utc_text(str(circuit)) if circuit is not None else None),
+            throttle_streak=int(row["throttle_streak"]),
+            paused_reason=(str(row["paused_reason"]) if row["paused_reason"] is not None else None),
+            paused_until_utc=(
+                _from_utc_text(str(paused_until)) if paused_until is not None else None
+            ),
+        )
+
+    def save_provider_runtime(
+        self,
+        source: str,
+        *,
+        cooldown_until_utc: datetime | None,
+        circuit_open_until_utc: datetime | None,
+        throttle_streak: int,
+        paused_reason: str | None,
+        paused_until_utc: datetime | None,
+        updated_at_utc: datetime,
+    ) -> None:
+        if throttle_streak < 0:
+            raise ValueError("throttle_streak must be nonnegative")
+        for value in (
+            cooldown_until_utc,
+            circuit_open_until_utc,
+            paused_until_utc,
+            updated_at_utc,
+        ):
+            if value is not None:
+                _utc_text(value)
+        self._connection.execute(
+            "INSERT INTO provider_runtime_state "
+            "(source,cooldown_until_utc,circuit_open_until_utc,throttle_streak,"
+            "paused_reason,updated_at_utc,paused_until_utc) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(source) DO UPDATE SET "
+            "cooldown_until_utc=excluded.cooldown_until_utc,"
+            "circuit_open_until_utc=excluded.circuit_open_until_utc,"
+            "throttle_streak=excluded.throttle_streak,"
+            "paused_reason=excluded.paused_reason,updated_at_utc=excluded.updated_at_utc,"
+            "paused_until_utc=excluded.paused_until_utc",
+            (
+                source,
+                _utc_text(cooldown_until_utc) if cooldown_until_utc is not None else None,
+                (_utc_text(circuit_open_until_utc) if circuit_open_until_utc is not None else None),
+                throttle_streak,
+                paused_reason,
+                _utc_text(updated_at_utc),
+                _utc_text(paused_until_utc) if paused_until_utc is not None else None,
+            ),
+        )
+
+    def reserve_request(
+        self,
+        request_id: str,
+        source: str,
+        provider_symbol: str,
+        attempted_at_utc: datetime,
+        *,
+        hourly_cap: int,
+        session_cap: int,
+    ) -> RequestReservation:
+        if not request_id or hourly_cap <= 0 or session_cap <= 0:
+            raise ValueError("request_id and positive request caps are required")
+        _utc_text(attempted_at_utc)
+        epoch_us = int(attempted_at_utc.timestamp() * 1_000_000)
+        hour_cutoff_us = epoch_us - 3_600_000_000
+        session_date = attempted_at_utc.astimezone(_ISTANBUL).date().isoformat()
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self._connection.execute(
+                "SELECT attempt_id FROM request_attempts WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if existing is not None:
+                self._connection.rollback()
+                return RequestReservation(False, "duplicate-request-id")
+            runtime = self.provider_runtime(source)
+            if runtime.paused_reason is not None:
+                if runtime.paused_until_utc is None or attempted_at_utc < runtime.paused_until_utc:
+                    self._connection.rollback()
+                    return RequestReservation(False, "provider-paused")
+                self._connection.execute(
+                    "UPDATE provider_runtime_state SET paused_reason=NULL,"
+                    "paused_until_utc=NULL,updated_at_utc=? WHERE source=?",
+                    (_utc_text(attempted_at_utc), source),
+                )
+            if (
+                runtime.circuit_open_until_utc is not None
+                and attempted_at_utc < runtime.circuit_open_until_utc
+            ):
+                self._connection.rollback()
+                return RequestReservation(False, "provider-circuit-open")
+            if (
+                runtime.cooldown_until_utc is not None
+                and attempted_at_utc < runtime.cooldown_until_utc
+            ):
+                self._connection.rollback()
+                return RequestReservation(False, "provider-cooldown")
+            hourly = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) FROM request_attempts WHERE source=? "
+                    "AND attempted_at_epoch_us>=? AND attempted_at_epoch_us<=?",
+                    (source, hour_cutoff_us, epoch_us),
+                ).fetchone()[0]
+            )
+            if hourly >= hourly_cap:
+                self._connection.rollback()
+                return RequestReservation(False, "rolling-hour-cap")
+            session = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) FROM request_attempts WHERE source=? AND session_date=?",
+                    (source, session_date),
+                ).fetchone()[0]
+            )
+            if session >= session_cap:
+                self._connection.rollback()
+                return RequestReservation(False, "exchange-session-cap")
+            cursor = self._connection.execute(
+                "INSERT INTO request_attempts "
+                "(request_id,source,provider_symbol,attempted_at_utc,attempted_at_epoch_us,"
+                "session_date,state) VALUES (?,?,?,?,?,?,'started')",
+                (
+                    request_id,
+                    source,
+                    provider_symbol,
+                    _utc_text(attempted_at_utc),
+                    epoch_us,
+                    session_date,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise StoreError("request reservation did not return an attempt identifier")
+            attempt_id = int(cursor.lastrowid)
+            self._connection.commit()
+            return RequestReservation(True, "allowed", attempt_id)
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+    def complete_request(
+        self, request_id: str, outcome_code: str, completed_at_utc: datetime
+    ) -> None:
+        _utc_text(completed_at_utc)
+        cursor = self._connection.execute(
+            "UPDATE request_attempts SET state='completed',outcome_code=?,completed_at_utc=? "
+            "WHERE request_id=? AND state='started'",
+            (outcome_code, _utc_text(completed_at_utc), request_id),
+        )
+        if cursor.rowcount != 1:
+            raise StoreError(f"request {request_id!r} is not in started state")
+
+    def cancel_request(self, request_id: str, completed_at_utc: datetime) -> None:
+        _utc_text(completed_at_utc)
+        cursor = self._connection.execute(
+            "UPDATE request_attempts SET state='cancelled',outcome_code='cancelled',"
+            "completed_at_utc=? WHERE request_id=? AND state='started'",
+            (_utc_text(completed_at_utc), request_id),
+        )
+        if cursor.rowcount != 1:
+            raise StoreError(f"request {request_id!r} is not in started state")
+
+    def request_attempt_count(self) -> int:
+        return self.integer_scalar("SELECT COUNT(*) FROM request_attempts")
+
+    def request_attempt_state(self, attempt_id: int) -> str:
+        row = self._connection.execute(
+            "SELECT state FROM request_attempts WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(attempt_id)
+        return str(row["state"])
+
+    def request_provider_symbol(self, request_id: str) -> str:
+        row = self._connection.execute(
+            "SELECT provider_symbol FROM request_attempts WHERE request_id=?", (request_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(request_id)
+        return str(row["provider_symbol"])
+
+    def outcome_count_since(self, source: str, outcome_code: str, since_utc: datetime) -> int:
+        _utc_text(since_utc)
+        cutoff_us = int(since_utc.timestamp() * 1_000_000)
+        return self.integer_scalar(
+            "SELECT COUNT(*) FROM request_attempts WHERE source=? AND outcome_code=? "
+            "AND attempted_at_epoch_us>=?",
+            (source, outcome_code, cutoff_us),
+        )
+
+    def record_schema_drift(
+        self, source: str, signature: str, provider_symbol: str, observed_at_utc: datetime
+    ) -> int:
+        _utc_text(observed_at_utc)
+        self._connection.execute(
+            "INSERT OR IGNORE INTO provider_schema_drift VALUES (?,?,?,?)",
+            (source, signature, provider_symbol, _utc_text(observed_at_utc)),
+        )
+        return self.integer_scalar(
+            "SELECT COUNT(*) FROM provider_schema_drift WHERE source=? AND signature=?",
+            (source, signature),
+        )
 
     def ingest(self, envelope: IngestEnvelope) -> IngestReport:
         self._validate_envelope(envelope)
@@ -935,8 +1209,9 @@ class WriterStore(StoreReader):
         temp_path: str,
     ) -> None:
         self._connection.execute(
-            "INSERT INTO compaction_manifests VALUES "
-            "(?,?,?,?, 'writing', ?,NULL,NULL,NULL,NULL,?,NULL)",
+            "INSERT INTO compaction_manifests "
+            "(attempt_id,source,interval_seconds,session_date,state,temp_path,created_at_utc) "
+            "VALUES (?,?,?,?,'writing',?,?)",
             (
                 attempt_id,
                 source,
@@ -1009,9 +1284,31 @@ class WriterStore(StoreReader):
                 (str(row["content_sha256"]) if row["content_sha256"] is not None else None),
                 int(row["row_count"]) if row["row_count"] is not None else None,
                 str(row["error"]) if row["error"] is not None else None,
+                (
+                    _from_utc_text(str(row["temp_removed_at_utc"]))
+                    if row["temp_removed_at_utc"] is not None
+                    else None
+                ),
+                (
+                    str(row["temp_removal_reason"])
+                    if row["temp_removal_reason"] is not None
+                    else None
+                ),
             )
             for row in rows
         )
+
+    def mark_manifest_temp_removed(
+        self, attempt_id: str, removed_at_utc: datetime, reason: str
+    ) -> None:
+        _utc_text(removed_at_utc)
+        cursor = self._connection.execute(
+            "UPDATE compaction_manifests SET temp_removed_at_utc=?,temp_removal_reason=? "
+            "WHERE attempt_id=? AND state='failed' AND temp_removed_at_utc IS NULL",
+            (_utc_text(removed_at_utc), reason, attempt_id),
+        )
+        if cursor.rowcount != 1:
+            raise StoreError(f"failed manifest {attempt_id!r} cannot record temp removal")
 
     def pending_manifests(self) -> tuple[StoredManifest, ...]:
         return self.manifests(("pending",))
