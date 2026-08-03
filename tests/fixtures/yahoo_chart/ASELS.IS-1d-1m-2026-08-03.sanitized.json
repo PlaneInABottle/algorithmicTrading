@@ -1,0 +1,31 @@
+{
+  "fixture_capture": {
+    "retrieved_at_utc": "2026-08-03T14:41:54.784629Z",
+    "http_status": 200,
+    "raw_response_bytes": 20602,
+    "raw_response_sha256": "81dc283fd930c130be669b4cd032c369981594f749edc0c0a8cf8bd6f90d7c46",
+    "selected_source_indices": [0, 5, 1, 452],
+    "sanitization": "Retained typed metadata and representative complete, null, final, and nonaligned observations; removed transport headers, cookies, and unselected rows."
+  },
+  "chart": {
+    "result": [{
+      "meta": {
+        "currency": "TRY", "symbol": "ASELS.IS", "exchangeName": "IST",
+        "fullExchangeName": "Istanbul", "instrumentType": "EQUITY",
+        "firstTradeDate": 957940200, "regularMarketTime": 1785767214,
+        "gmtoffset": 10800, "timezone": "TRT",
+        "exchangeTimezoneName": "Europe/Istanbul", "dataGranularity": "1m",
+        "range": "1d", "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
+      },
+      "timestamp": [1785740100, 1785740400, 1785740160, 1785767214],
+      "indicators": {"quote": [{
+        "open": [344.0, 343.75, null, 335.75],
+        "high": [344.0, 344.5, null, 335.75],
+        "low": [344.0, 342.5, null, 335.75],
+        "close": [344.0, 343.75, null, 335.75],
+        "volume": [0, 602821, null, 0]
+      }]}
+    }],
+    "error": null
+  }
+}

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bist-minute-collector"
+version = "0.1.0"
+description = "Validated provider contracts for a bounded BIST minute-data research collector"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "httpx>=0.28.1,<0.29",
+  "pyarrow>=21,<26",
+]
+
+[project.scripts]
+bist-minute-collector = "bist_minute_collector.cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<0.13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bist_minute_collector"]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-markers", "--strict-config"]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+  "network: bounded opt-in requests to an external research provider",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["src", "tests"]

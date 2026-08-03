@@ -1,0 +1,31 @@
+{
+  "fixture_capture": {
+    "retrieved_at_utc": "2026-08-03T14:41:55.447825Z",
+    "http_status": 200,
+    "raw_response_bytes": 20571,
+    "raw_response_sha256": "6ea7dccfb8e04a970e2eb7e287448b842a95770c9c47fe3e5f2d250871d7e58f",
+    "selected_source_indices": [0, 5, 1, 452],
+    "sanitization": "Retained typed metadata and representative complete, null, final, and nonaligned observations; removed transport headers, cookies, and unselected rows."
+  },
+  "chart": {
+    "result": [{
+      "meta": {
+        "currency": "TRY", "symbol": "THYAO.IS", "exchangeName": "IST",
+        "fullExchangeName": "Istanbul", "instrumentType": "EQUITY",
+        "firstTradeDate": 957940200, "regularMarketTime": 1785767214,
+        "gmtoffset": 10800, "timezone": "TRT",
+        "exchangeTimezoneName": "Europe/Istanbul", "dataGranularity": "1m",
+        "range": "1d", "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
+      },
+      "timestamp": [1785740100, 1785740400, 1785740160, 1785767214],
+      "indicators": {"quote": [{
+        "open": [320.5, 320.75, null, 318.5],
+        "high": [320.5, 322.0, null, 318.5],
+        "low": [320.5, 320.5, null, 318.5],
+        "close": [320.5, 321.75, null, 318.5],
+        "volume": [0, 1781176, null, 0]
+      }]}
+    }],
+    "error": null
+  }
+}

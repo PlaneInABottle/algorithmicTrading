@@ -1,0 +1,31 @@
+{
+  "fixture_capture": {
+    "retrieved_at_utc": "2026-08-03T14:41:56.071534Z",
+    "http_status": 200,
+    "raw_response_bytes": 20833,
+    "raw_response_sha256": "dd1be8491b2fc495f866d95b41a892cea1bbe2566f142f667c9eb9059f29f3cb",
+    "selected_source_indices": [0, 5, 1, 452],
+    "sanitization": "Retained typed metadata and representative complete, null, final, and nonaligned observations; removed transport headers, cookies, and unselected rows."
+  },
+  "chart": {
+    "result": [{
+      "meta": {
+        "currency": "TRY", "symbol": "DSTKF.IS", "exchangeName": "IST",
+        "fullExchangeName": "Istanbul", "instrumentType": "EQUITY",
+        "firstTradeDate": 1738823400, "regularMarketTime": 1785767213,
+        "gmtoffset": 10800, "timezone": "TRT",
+        "exchangeTimezoneName": "Europe/Istanbul", "dataGranularity": "1m",
+        "range": "1d", "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "ytd", "max"]
+      },
+      "timestamp": [1785740100, 1785740400, 1785740160, 1785767213],
+      "indicators": {"quote": [{
+        "open": [1703.0, 1703.0, null, 1633.0],
+        "high": [1703.0, 1712.0, null, 1633.0],
+        "low": [1703.0, 1672.0, null, 1633.0],
+        "close": [1703.0, 1682.0, null, 1633.0],
+        "volume": [0, 8130, null, 0]
+      }]}
+    }],
+    "error": null
+  }
+}

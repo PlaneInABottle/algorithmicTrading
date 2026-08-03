@@ -1,0 +1,40 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+config.local.toml
+
+# Collector runtime state (Phase 2+)
+data/
+state/
+logs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.parquet
+*.tmp
+
+# Editors / operating systems
+.DS_Store
+.idea/
+.vscode/
+*~

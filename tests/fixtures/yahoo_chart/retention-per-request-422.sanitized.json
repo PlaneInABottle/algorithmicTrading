@@ -1,0 +1,9 @@
+{
+  "chart": {
+    "result": null,
+    "error": {
+      "code": "Unprocessable Entity",
+      "description": "Only 8 days worth of 1m granularity data are allowed to be fetched per request."
+    }
+  }
+}

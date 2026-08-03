@@ -1,0 +1,31 @@
+{
+  "fixture_capture": {
+    "retrieved_at_utc": "2026-08-03T14:41:54.785937Z",
+    "http_status": 200,
+    "raw_response_bytes": 37099,
+    "raw_response_sha256": "daa56a2ce137a018876a45eecee48ac9a6005a0401320725538349a8766bcc0e",
+    "selected_source_indices": [0, 5, 1, 452],
+    "sanitization": "Retained typed metadata and representative complete, null, final, and nonaligned observations; removed transport headers, cookies, and unselected rows."
+  },
+  "chart": {
+    "result": [{
+      "meta": {
+        "currency": "TRY", "symbol": "AKBNK.IS", "exchangeName": "IST",
+        "fullExchangeName": "Istanbul", "instrumentType": "EQUITY",
+        "firstTradeDate": 957940200, "regularMarketTime": 1785767213,
+        "gmtoffset": 10800, "timezone": "TRT",
+        "exchangeTimezoneName": "Europe/Istanbul", "dataGranularity": "1m",
+        "range": "1d", "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
+      },
+      "timestamp": [1785740100, 1785740400, 1785740160, 1785767213],
+      "indicators": {"quote": [{
+        "open": [64.19999694824219, 64.1500015258789, null, 66.05000305175781],
+        "high": [64.19999694824219, 64.6500015258789, null, 66.05000305175781],
+        "low": [64.19999694824219, 63.900001525878906, null, 66.05000305175781],
+        "close": [64.19999694824219, 64.6500015258789, null, 66.05000305175781],
+        "volume": [0, 6345826, null, 0]
+      }]}
+    }],
+    "error": null
+  }
+}

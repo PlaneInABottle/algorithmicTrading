@@ -1,0 +1,31 @@
+{
+  "fixture_capture": {
+    "retrieved_at_utc": "2026-08-03T14:41:55.448167Z",
+    "http_status": 200,
+    "raw_response_bytes": 20576,
+    "raw_response_sha256": "7c4c3066df5cf0ead0549ab961a1c7925a9a53963df1363fd7f46d9536654b21",
+    "selected_source_indices": [0, 5, 1, 452],
+    "sanitization": "Retained typed metadata and representative complete, null, final, and nonaligned observations; removed transport headers, cookies, and unselected rows."
+  },
+  "chart": {
+    "result": [{
+      "meta": {
+        "currency": "TRY", "symbol": "TUPRS.IS", "exchangeName": "IST",
+        "fullExchangeName": "Istanbul", "instrumentType": "EQUITY",
+        "firstTradeDate": 957940200, "regularMarketTime": 1785767214,
+        "gmtoffset": 10800, "timezone": "TRT",
+        "exchangeTimezoneName": "Europe/Istanbul", "dataGranularity": "1m",
+        "range": "1d", "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
+      },
+      "timestamp": [1785740100, 1785740400, 1785740160, 1785767214],
+      "indicators": {"quote": [{
+        "open": [293.0, 292.75, null, 292.0],
+        "high": [293.0, 293.0, null, 292.0],
+        "low": [293.0, 287.5, null, 292.0],
+        "close": [293.0, 291.25, null, 292.0],
+        "volume": [0, 834048, null, 0]
+      }]}
+    }],
+    "error": null
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "bist-equity-calendar-2026-retrieved-2026-08-03",
+  "exchange": "Borsa Istanbul Equity Market",
+  "timezone": "Europe/Istanbul",
+  "effective_from": "2026-01-05",
+  "effective_to": "2026-12-31",
+  "retrieved_at_utc": "2026-08-03T14:59:08Z",
+  "sources": [
+    {
+      "name": "Borsa Istanbul official holidays",
+      "url": "https://borsaistanbul.com/en/official-holidays",
+      "retrieved_at_utc": "2026-08-03T14:59:06.425844Z",
+      "sha256": "3ef1b33c599c86e6b6b519abad58ecc70bf6c101516e949d3fcd5c0e13dee4ac",
+      "role": "2026-holiday-and-half-day-source"
+    },
+    {
+      "name": "Borsa Istanbul Equity Market Procedure ENG revision 18",
+      "url": "https://www.borsaistanbul.com/files/equity-market-procedure.pdf",
+      "retrieved_at_utc": "2026-08-03T14:59:07.887920Z",
+      "sha256": "16afd4b08e81d9b80dfc2893f4f55838f1266227302ea4feb647b9422cca1520",
+      "role": "current-standard-equity-session-transitions"
+    }
+  ],
+  "transcription_sha256": "0bf937aa820b43b86f89946995189aebeae8d809ee7c4ae49d93b2b974fcbd16",
+  "session_scope": "standard continuous-trading equities; session state transitions, not guaranteed bar times",
+  "full_day_transitions": [
+    {"state": "opening_auction_order_collection", "at": "09:40:00"},
+    {"state": "opening_auction_restricted_period", "at": "09:50:00"},
+    {"state": "opening_uncrossing", "at": "09:55:00"},
+    {"state": "continuous_trading", "at": "10:00:00"},
+    {"state": "closing_margin_dissemination", "at": "18:00:00"},
+    {"state": "closing_auction_order_collection", "at": "18:01:00"},
+    {"state": "closing_uncrossing", "at": "18:05:00"},
+    {"state": "closing_price_dissemination", "at": "18:07:00"},
+    {"state": "trades_at_closing_price", "at": "18:08:00"},
+    {"state": "settlement_price_calculation", "at": "18:10:00"},
+    {"state": "end_of_day", "at": "18:19:00"}
+  ],
+  "half_day_transitions": [
+    {"state": "opening_auction_order_collection", "at": "09:40:00"},
+    {"state": "opening_auction_restricted_period", "at": "09:50:00"},
+    {"state": "opening_uncrossing", "at": "09:55:00"},
+    {"state": "continuous_trading", "at": "10:00:00"},
+    {"state": "closing_margin_dissemination", "at": "12:30:00"},
+    {"state": "closing_auction_order_collection", "at": "12:31:00"},
+    {"state": "closing_uncrossing", "at": "12:35:00"},
+    {"state": "closing_price_dissemination", "at": "12:37:00"},
+    {"state": "trades_at_closing_price", "at": "12:38:00"},
+    {"state": "settlement_price_calculation", "at": "12:40:00"},
+    {"state": "end_of_day", "at": "12:49:00"}
+  ],
+  "holiday_events": [
+    {"date": "2026-01-01", "name": "New Year's Day", "state": "closed"},
+    {"date": "2026-03-19", "name": "Ramadan Feast eve", "state": "half_day_until_13:00"},
+    {"date": "2026-03-20", "name": "Ramadan Feast", "state": "closed"},
+    {"date": "2026-03-21", "name": "Ramadan Feast", "state": "closed"},
+    {"date": "2026-03-22", "name": "Ramadan Feast", "state": "closed"},
+    {"date": "2026-04-23", "name": "National Sovereignty and Children's Day", "state": "closed"},
+    {"date": "2026-05-01", "name": "Labour and Solidarity Day", "state": "closed"},
+    {"date": "2026-05-19", "name": "Commemoration of Ataturk, Youth and Sports Day", "state": "closed"},
+    {"date": "2026-05-26", "name": "Eid Al-Adha eve", "state": "half_day_until_13:00"},
+    {"date": "2026-05-27", "name": "Eid Al-Adha", "state": "closed"},
+    {"date": "2026-05-28", "name": "Eid Al-Adha", "state": "closed"},
+    {"date": "2026-05-29", "name": "Eid Al-Adha", "state": "closed"},
+    {"date": "2026-05-30", "name": "Eid Al-Adha", "state": "closed"},
+    {"date": "2026-07-15", "name": "Democracy and National Unity Day", "state": "closed"},
+    {"date": "2026-08-30", "name": "Victory Day", "state": "closed"},
+    {"date": "2026-10-28", "name": "Republic Day eve", "state": "half_day_until_13:00"},
+    {"date": "2026-10-29", "name": "Republic Day", "state": "closed"}
+  ],
+  "limitations": [
+    "This snapshot does not prove historical sessions before its effective date.",
+    "It does not contain symbol suspensions, VBTS restrictions, circuit-breaker activations, or point-in-time membership.",
+    "State transitions are not expected OHLCV bars; auctions and no-trade minutes may have no bar.",
+    "The official holiday label 'until 13:00' and the procedure's 12:49 end-of-day state describe different boundaries and are retained separately.",
+    "Instrument-specific session eligibility must be established separately before classifying a gap outside-session."
+  ]
+}
