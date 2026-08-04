@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
@@ -19,7 +19,7 @@ from .models import FetchResult, MinuteBar, OutcomeCode
 if TYPE_CHECKING:
     from .snapshots import UniverseSnapshot
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 FaultInjector = Callable[[str], None]
 
 
@@ -469,7 +469,41 @@ CREATE INDEX IF NOT EXISTS universe_activations_time
 ON universe_activations(activated_at_utc,activation_id);
 """
 
-MIGRATIONS = {1: MIGRATION_V1, 2: MIGRATION_V2, 3: MIGRATION_V3, 4: MIGRATION_V4}
+MIGRATION_V5 = """
+CREATE TABLE IF NOT EXISTS collector_runs (
+    run_id TEXT PRIMARY KEY,
+    session_date TEXT NOT NULL,
+    calendar_snapshot_id TEXT NOT NULL,
+    universe_snapshot_id TEXT NOT NULL,
+    attempted_at_utc TEXT NOT NULL,
+    completed_at_utc TEXT,
+    status TEXT NOT NULL CHECK (status IN (
+        'started','succeeded','skipped-closed','skipped-pre-close',
+        'failed-unverified-calendar','failed','interrupted'
+    )),
+    reason TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0),
+    successful_symbols INTEGER NOT NULL DEFAULT 0 CHECK (successful_symbols >= 0),
+    denied_symbols INTEGER NOT NULL DEFAULT 0 CHECK (denied_symbols >= 0),
+    recovered_gaps INTEGER NOT NULL DEFAULT 0 CHECK (recovered_gaps >= 0),
+    unresolved_gaps INTEGER NOT NULL DEFAULT 0 CHECK (unresolved_gaps >= 0),
+    partition_count INTEGER NOT NULL DEFAULT 0 CHECK (partition_count >= 0),
+    quick_check TEXT,
+    health_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS collector_runs_attempted
+ON collector_runs(attempted_at_utc,run_id);
+CREATE INDEX IF NOT EXISTS collector_runs_status_attempted
+ON collector_runs(status,attempted_at_utc,run_id);
+"""
+
+MIGRATIONS = {
+    1: MIGRATION_V1,
+    2: MIGRATION_V2,
+    3: MIGRATION_V3,
+    4: MIGRATION_V4,
+    5: MIGRATION_V5,
+}
 
 
 def _migration_statements(sql: str) -> Iterator[str]:
@@ -588,6 +622,38 @@ class StoreReader(AbstractContextManager["StoreReader"]):
         return self.integer_scalar(
             "SELECT COUNT(*) FROM universe_members WHERE snapshot_id=?", (snapshot_id,)
         )
+
+    @staticmethod
+    def _run_row(row: sqlite3.Row | None) -> dict[str, object] | None:
+        if row is None:
+            return None
+        result = {str(key): row[key] for key in row.keys()}
+        try:
+            result["health"] = json.loads(str(result.pop("health_json")))
+        except json.JSONDecodeError as error:
+            raise StoreError("collector run has malformed health JSON") from error
+        return result
+
+    def latest_collector_run(self) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT * FROM collector_runs ORDER BY attempted_at_utc DESC,run_id DESC LIMIT 1"
+        ).fetchone()
+        return self._run_row(row)
+
+    def collector_run_status(self) -> dict[str, dict[str, object] | None]:
+        def latest(where: str = "1=1") -> dict[str, object] | None:
+            row = self._connection.execute(
+                "SELECT * FROM collector_runs WHERE "
+                f"{where} ORDER BY attempted_at_utc DESC,run_id DESC LIMIT 1"
+            ).fetchone()
+            return self._run_row(row)
+
+        return {
+            "latest": latest(),
+            "last_attempt": latest(),
+            "last_success": latest("status IN ('succeeded','skipped-closed','skipped-pre-close')"),
+            "last_completed_cycle": latest("status='succeeded'"),
+        }
 
 
 class WriterStore(StoreReader):
@@ -726,6 +792,85 @@ class WriterStore(StoreReader):
                 _utc_text(paused_until_utc) if paused_until_utc is not None else None,
             ),
         )
+
+    def start_collector_run(
+        self,
+        run_id: str,
+        *,
+        session_date: date,
+        attempted_at_utc: datetime,
+        calendar_snapshot_id: str,
+        universe_snapshot_id: str,
+    ) -> None:
+        if not run_id or not calendar_snapshot_id or not universe_snapshot_id:
+            raise ValueError("run and snapshot identities are required")
+        self._connection.execute(
+            "INSERT INTO collector_runs "
+            "(run_id,session_date,calendar_snapshot_id,universe_snapshot_id,"
+            "attempted_at_utc,status,reason) VALUES (?,?,?,?,?,'started','started')",
+            (
+                run_id,
+                session_date.isoformat(),
+                calendar_snapshot_id,
+                universe_snapshot_id,
+                _utc_text(attempted_at_utc),
+            ),
+        )
+
+    def finish_collector_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        reason: str,
+        completed_at_utc: datetime,
+        request_count: int = 0,
+        successful_symbols: int = 0,
+        denied_symbols: int = 0,
+        recovered_gaps: int = 0,
+        unresolved_gaps: int = 0,
+        partition_count: int = 0,
+        quick_check: str | None = None,
+        health: dict[str, object] | None = None,
+    ) -> None:
+        if status == "started":
+            raise ValueError("a finished run cannot remain started")
+        counts = (
+            request_count,
+            successful_symbols,
+            denied_symbols,
+            recovered_gaps,
+            unresolved_gaps,
+            partition_count,
+        )
+        if any(item < 0 for item in counts):
+            raise ValueError("run accounting cannot be negative")
+        encoded_health = json.dumps(health or {}, sort_keys=True, separators=(",", ":"))
+        cursor = self._connection.execute(
+            "UPDATE collector_runs SET completed_at_utc=?,status=?,reason=?,request_count=?,"
+            "successful_symbols=?,denied_symbols=?,recovered_gaps=?,unresolved_gaps=?,"
+            "partition_count=?,quick_check=?,health_json=? "
+            "WHERE run_id=? AND status='started'",
+            (
+                _utc_text(completed_at_utc),
+                status,
+                reason[:500],
+                *counts,
+                quick_check,
+                encoded_health,
+                run_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StoreError(f"collector run {run_id!r} is not in started state")
+
+    def reconcile_started_runs(self, observed_at_utc: datetime) -> int:
+        cursor = self._connection.execute(
+            "UPDATE collector_runs SET completed_at_utc=?,status='interrupted',"
+            "reason='process-exited-before-terminal-status' WHERE status='started'",
+            (_utc_text(observed_at_utc),),
+        )
+        return cursor.rowcount
 
     def reserve_request(
         self,

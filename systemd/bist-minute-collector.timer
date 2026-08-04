@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekday 19:30 Istanbul BIST minute collection
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 19:30:00 Europe/Istanbul
+Persistent=true
+AccuracySec=1min
+Unit=bist-minute-collector.service
+
+[Install]
+WantedBy=timers.target
+

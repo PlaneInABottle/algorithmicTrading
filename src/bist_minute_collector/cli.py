@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from collections import Counter
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn
@@ -13,8 +14,17 @@ from .archive import ArchiveCompactor, ArchiveError
 from .calendar_engine import BistCalendar
 from .collector import Collector, CollectorConfig, SymbolRoute
 from .gaps import GapState, RecoveryPlanner
+from .oneshot import DailyOneShot, DailyRunStatus
 from .provider import YahooChartProvider
 from .recovery import RecoveryEngine
+from .service import (
+    ServiceError,
+    ServicePaths,
+    exact_systemctl,
+    install_user_units,
+    journal_logs,
+    systemd_status,
+)
 from .snapshots import (
     SnapshotValidationError,
     load_calendar_snapshot,
@@ -67,6 +77,20 @@ def _parser() -> argparse.ArgumentParser:
     gaps.add_argument("--data-root", type=Path, default=_default_data_root())
     gaps.add_argument("--state")
     gaps.add_argument("--json", action="store_true")
+    run_once = commands.add_parser("run-once", help="run one daily post-close workflow and exit")
+    run_once.add_argument("--data-root", type=Path, default=_default_data_root())
+    run_once.add_argument("--dry-run", action="store_true")
+    install = commands.add_parser(
+        "install-service", help="verify and install only the exact user service and timer"
+    )
+    install.add_argument("--dry-run", action="store_true")
+    commands.add_parser("start-now", help="start exactly one user-service invocation")
+    commands.add_parser("enable-timer", help="enable and start only the exact user timer")
+    commands.add_parser("disable-timer", help="disable and stop only the exact user timer")
+    status = commands.add_parser("status", help="report durable run and exact systemd timer state")
+    status.add_argument("--data-root", type=Path, default=_default_data_root())
+    status.add_argument("--json", action="store_true")
+    commands.add_parser("logs", help="show a bounded journal view for the exact user service")
     return parser
 
 
@@ -336,6 +360,95 @@ def _collect_once(data_root: Path | None, raw_symbols: str, *, dry_run: bool) ->
         _fail(str(error))
 
 
+def _run_daily(data_root: Path, *, dry_run: bool) -> int:
+    try:
+        calendar = BistCalendar(load_calendar_snapshot(CALENDAR_PATH))
+        universe = load_universe_snapshot(UNIVERSE_PATH)
+        result = asyncio.run(
+            DailyOneShot(
+                data_root,
+                YahooChartProvider(timeout_seconds=15),
+                calendar,
+                universe,
+            ).run(now_utc=datetime.now(UTC), dry_run=dry_run)
+        )
+    except (OSError, StoreError, ArchiveError, SnapshotValidationError, ValueError) as error:
+        _fail(str(error))
+    payload = asdict(result)
+    payload["status"] = result.status.value
+    payload["session_date"] = result.session_date.isoformat()
+    payload["ok"] = result.status in {
+        DailyRunStatus.DRY_RUN,
+        DailyRunStatus.SUCCEEDED,
+        DailyRunStatus.SKIPPED_CLOSED,
+        DailyRunStatus.SKIPPED_PRE_CLOSE,
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0 if payload["ok"] else 1
+
+
+def _install_service(*, dry_run: bool) -> int:
+    try:
+        report = install_user_units(ServicePaths.current(), dry_run=dry_run)
+    except (OSError, ServiceError) as error:
+        _fail(str(error))
+    print(
+        json.dumps(
+            {
+                "installed": report.installed,
+                "ok": True,
+                "units": [str(path) for path in report.unit_paths],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _systemctl_action(action: str) -> int:
+    result = exact_systemctl(action)
+    if result.returncode != 0:
+        _fail((result.stderr or result.stdout).strip() or f"{action} failed")
+    print(json.dumps({"action": action, "ok": True}, sort_keys=True))
+    return 0
+
+
+def _status(data_root: Path) -> int:
+    try:
+        unit = systemd_status()
+        with WriterStore.open_reader(data_root) as reader:
+            durable = reader.collector_run_status()
+            database = {
+                "active_partitions": reader.integer_scalar(
+                    "SELECT COUNT(*) FROM compaction_manifests WHERE state='active'"
+                ),
+                "cursors": reader.integer_scalar("SELECT COUNT(*) FROM cursor_state"),
+                "quick_check": reader.quick_check(),
+                "unresolved_gaps": reader.integer_scalar(
+                    "SELECT COUNT(*) FROM gap_current WHERE state IN "
+                    "('pending','provider-empty/unverifiable')"
+                ),
+            }
+    except (OSError, StoreError, ServiceError) as error:
+        _fail(str(error))
+    ok = bool(unit["healthy"]) and database["quick_check"] == "ok"
+    print(
+        json.dumps(
+            {"database": database, "durable_runs": durable, "ok": ok, "systemd": unit},
+            sort_keys=True,
+        )
+    )
+    return 0 if ok else 1
+
+
+def _logs() -> int:
+    result = journal_logs()
+    if result.returncode != 0:
+        _fail((result.stderr or result.stdout).strip() or "journal query failed")
+    print(result.stdout, end="")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command == "doctor":
@@ -354,4 +467,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     if arguments.command == "gaps":
         return _gaps(arguments.data_root, arguments.state)
+    if arguments.command == "run-once":
+        return _run_daily(arguments.data_root, dry_run=arguments.dry_run)
+    if arguments.command == "install-service":
+        return _install_service(dry_run=arguments.dry_run)
+    if arguments.command in {"start-now", "enable-timer", "disable-timer"}:
+        return _systemctl_action(arguments.command)
+    if arguments.command == "status":
+        return _status(arguments.data_root)
+    if arguments.command == "logs":
+        return _logs()
     raise AssertionError(f"unhandled command: {arguments.command}")

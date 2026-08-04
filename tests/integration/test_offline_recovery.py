@@ -36,7 +36,7 @@ class ExactRecoveryProvider:
                 outcome=OutcomeCode.SOURCE_EMPTY,
                 retrieved_at_utc=window.end_utc,
             )
-            return replace(base, symbol=symbol, request_window=window)
+            return replace(base, source=self.source, symbol=symbol, request_window=window)
         bars = []
         cursor = window.start_utc
         while cursor < window.end_utc:
@@ -48,8 +48,11 @@ class ExactRecoveryProvider:
                 )
             )
             cursor += timedelta(minutes=1)
+        result = with_symbol(fetch_result(bars=tuple(bars)), symbol)
         return replace(
-            with_symbol(fetch_result(bars=tuple(bars)), symbol),
+            result,
+            source=self.source,
+            bars=tuple(replace(bar, source=self.source) for bar in result.bars),
             request_window=window,
             retrieved_at_utc=window.end_utc,
         )

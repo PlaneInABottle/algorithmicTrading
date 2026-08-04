@@ -1,0 +1,14 @@
+# Phase 5 Focused Confirmation — M1 (current-session double-fetch / inflated gap accounting)
+
+**Verdict: APPROVE.** No Critical, High, or Medium finding remains. Prior Medium M1 is correctly resolved test-first without weakening the other invariants.
+
+## M1 verification (file:line evidence)
+
+- **RED/GREEN test present and green:** `test_consecutive_day_recovers_only_before_current_session_then_sweeps_once` (`tests/integration/test_daily_oneshot_process.py:89-111`) runs day 1 (fresh, `len(provider.calls) == 50`), then a second consecutive daily run and asserts `second.requests == 50`, `second.recovered_gaps == 0`, `len(provider.calls) == 50`, and that every call uses the current session's `query_window` — proving the current session is swept exactly once with zero duplicate recovery fetches and zero inflated gap accounting. The test is in the collected set with `lastfailed={}`.
+- **Fix:** `oneshot.py:259-266` passes `decision.query_window.start_utc` as `recover_through_utc`; `startup_recovery` (`recovery.py:210-249`) bounds recovery to `[cursor, recover_through_utc]` and skips cursor-less routes. The planner therefore never re-plans the current session (the sweep's window), and `RecoverySummary` counts only genuinely-missed past sessions.
+- **Older missed-session recovery preserved:** `recover_through_utc` = current session start means recovery covers everything strictly before today — a failed day's or outage's missing sessions (whose cursors lag) are still recovered on the next run; today's session is exclusively the sweep's. The default `recover_through_utc=None` keeps the prior unbounded semantics for direct callers (`test_startup_recovery_resumes_from_durable_cursor_without_replaying_closed_time`, `tests/integration/test_offline_recovery.py`).
+- **28-day truthfulness preserved:** the planner's `now − 28d` cutoff is independent of `recover_through_utc`; expired gaps remain `unrecoverable` with no futile calls (`test_35_day_offline_recovery_records_unrecoverable_without_provider_call`).
+- **Cursor semantics preserved:** startup recovery still reads durable cursors and advances only on exact+successful fetches; the sweep advances cursors to the current session end. Fresh-run (`test_daily_oneshot_process.py:59-86`) and same-day rerun both yield one sweep fetch per symbol with no recovery re-fetch (`if start >= recovery_end: continue`, `recovery.py:238-239`).
+- **Daily post-close contract preserved:** reconcile → recover (bounded before current session) → sweep → compact closed sessions → durable last-attempt/last-success/last-completed status; max two workers / one writer, persisted cooldown/circuit/caps, and no-synthetic-bars semantics unchanged.
+
+Read-only confirmation only — no files edited, no network, no installs/enables/starts, and the production data root was not touched. No Critical, High, or Medium Phase 5 finding remains.

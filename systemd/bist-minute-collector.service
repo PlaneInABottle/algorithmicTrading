@@ -1,0 +1,22 @@
+[Unit]
+Description=Daily post-close BIST minute research collector
+Documentation=file:///home/mirza/Documents/Projects/algorithmicTrading/OPERATIONS.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/mirza/Documents/Projects/algorithmicTrading
+ExecStart=/home/mirza/Documents/Projects/algorithmicTrading/.venv/bin/bist-minute-collector run-once --data-root /home/mirza/.local/share/bist-minute-collector/data
+TimeoutStartSec=15min
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/mirza/.local/share/bist-minute-collector/data
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+

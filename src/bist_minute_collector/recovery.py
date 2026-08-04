@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from .backoff import DurableRequestPolicy, RetryPolicy
 from .calendar_engine import BistCalendar
@@ -103,7 +103,11 @@ class RecoveryEngine:
                 request_count += 1
                 for gap in active_gaps:
                     ledger.record_attempt(gap, request_id, attempted_at)
-                result = await self.provider.fetch_one(route.provider_symbol, task.window)
+                try:
+                    result = await self.provider.fetch_one(route.provider_symbol, task.window)
+                except asyncio.CancelledError:
+                    policy.cancel(request_id, datetime.now(UTC))
+                    raise
                 policy.observe(request_id, result, result.retrieved_at_utc)
                 final_result = result
                 final_request_id = request_id
@@ -214,21 +218,31 @@ async def startup_recovery(
     routes: tuple[SymbolRoute, ...],
     *,
     now_utc: datetime,
+    recover_through_utc: datetime | None = None,
 ) -> tuple[RecoveryReport, ...]:
-    """Resume only uncovered time after each durable cursor, bounded by 28 days."""
+    """Resume uncovered time after each cursor, optionally before the current sweep."""
+
+    recovery_end = recover_through_utc or now_utc
+    for instant in (now_utc, recovery_end):
+        if instant.tzinfo is None or instant.utcoffset() != timedelta(0):
+            raise ValueError("recovery bounds must be timezone-aware UTC")
+    if recovery_end > now_utc:
+        raise ValueError("recovery end cannot be after the run observation time")
 
     reports: list[RecoveryReport] = []
     engine = RecoveryEngine(store, provider, calendar)
     for route in routes:
         cursor = store.cursor(provider.source, route.exchange_code, 60)
-        start = cursor.accounted_through_utc if cursor is not None else now_utc - timedelta(days=1)
-        if start >= now_utc:
+        if cursor is None:
+            continue
+        start = cursor.accounted_through_utc
+        if start >= recovery_end:
             continue
         reports.append(
             await engine.recover(
                 route,
                 start_utc=start,
-                end_utc=now_utc,
+                end_utc=recovery_end,
                 now_utc=now_utc,
             )
         )

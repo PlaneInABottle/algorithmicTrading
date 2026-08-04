@@ -1,7 +1,7 @@
 # Durable BIST 50 One-Minute Collector — Implementation Plan
 
 Verification date: **2026-08-04 (Europe/Istanbul)**
-Status: **Phases 1–4 implemented and reviewed; the revised daily one-shot Phase 5 is authorized and active**
+Status: **Phases 1–5 implemented and reviewed; Phase 5 is green and awaiting its pre-install commit/runtime acceptance**
 Scope: current BIST 50 constituents, Yahoo one-minute data as a bounded free research source, and a provider-neutral path to licensed data later.
 
 This is the canonical implementation plan for the minute-data collector. It complements the broader [BIST backfill/backtest research](../../BIST_BACKTEST_SYSTEM_RESEARCH.md); it does not change that report's conclusions about data rights, historical depth, or evidentiary limits.
@@ -746,11 +746,11 @@ systemctl --user is-enabled bist-minute-collector.timer
 4. **[U] Calendar/suspensions:** Phase 1 froze the sourced current 2026 schedule and holiday transcription, but symbol-level suspensions and historical calendar/rule states still require later official-source work.
 5. **[U] Boot evidence:** `Linger=yes` and unit semantics support boot resume, but only an actual reboot proves this machine's end-to-end behavior.
 6. **[U] Long observation:** weeks-long uptime, natural 429/outage/correction behavior, and holiday/half-day behavior cannot be established in this planning turn.
-7. **[A] Git and service actions:** local initialization and reviewed Phase 1–3 commits are complete. The Phase 4 and daily Phase 5 commits, exact two-user-unit installation, timer enablement, and one manual acceptance run are authorized after their gates/reviews. Remotes, merge, push, reset, clean, force, and history rewriting remain forbidden.
+7. **[A] Git and service actions:** reviewed Phase 1–4 commits are complete. The daily Phase 5 commit, exact two-user-unit installation, timer enablement, and one manual acceptance run are authorized now that its gates/review pass. Remotes, merge, push, reset, clean, force, and history rewriting remain forbidden.
 
 ### Next implementation gate
 
-Phase 4 is complete, reviewed, and ready for its authorized local commit. The active next gate is the revised **Phase 5 daily one-shot RED suite**: repository-rendered timer/service semantics, closed-date zero-network behavior, bounded workflow ordering, durable last-run status, installer isolation, and one-shot process recovery. Implementation must remain uninstalled and disabled until its gates and exact review pass.
+Phase 5 implementation and exact review are complete and green. The next gate is the authorized scoped **Phase 5 local commit**, followed by exact service/timer installation, `enable --now` of only the timer, and one manual one-shot acceptance invocation. Runtime acceptance must preserve the production data root and prove SQLite/request/cursor/gap/partition accounting, timer waiting state, successful inactive one-shot semantics, and absence of collector/broker leftovers.
 
 ## 12. Source register
 
@@ -771,6 +771,7 @@ Verified/referenced on 2026-08-03:
 - Apache Arrow Parquet: <https://arrow.apache.org/docs/python/parquet.html>
 - uv: <https://docs.astral.sh/uv/>
 - systemd service: <https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html>
+- systemd timer: <https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html>
 - systemd execution environment: <https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html>
 - loginctl/linger: <https://www.freedesktop.org/software/systemd/man/latest/loginctl.html>
 
@@ -786,4 +787,6 @@ The [full Phase 1 review](../reviews/bist-minute-collector-phase1-opencode-revie
 
 The [full Phase 3 review](../reviews/bist-minute-collector-phase3-opencode-review.md) returned **REVISE** with one Medium and six Low findings. M1 and L1 were fixed test-first; all findings are reconciled in the [Phase 3 disposition](../reviews/bist-minute-collector-phase3-review-disposition.md). Because M1 required a fix, the single permitted [focused Phase 3 confirmation](../reviews/bist-minute-collector-phase3-opencode-confirmation.md) ran in the same session/model/agent and returned **APPROVE**, explicitly with no remaining Critical, High, or Medium finding. The [Phase 3 RED/GREEN evidence](../reviews/bist-minute-collector-phase3-red-green-evidence.md) records the exact gates and bounded live request accounting.
 
-**Phase 4 status (2026-08-04):** calendar/session classification, append-only gap states, bounded oldest-first recovery, immutable universe activation, dry-run backfill, and additive schema v4 were implemented test-first. The [full Phase 4 review](../reviews/bist-minute-collector-phase4-opencode-review.md) returned **REVISE** with one Medium finding about exact historical Yahoo request windows. It was fixed test-first, the one permitted [focused Phase 4 confirmation](../reviews/bist-minute-collector-phase4-opencode-confirmation.md) returned **APPROVE** with no remaining Critical, High, or Medium finding, and all findings are reconciled in the [Phase 4 disposition](../reviews/bist-minute-collector-phase4-review-disposition.md). The [Phase 4 RED/GREEN evidence](../reviews/bist-minute-collector-phase4-red-green-evidence.md) records the gates. The revised daily Phase 5 is authorized but not yet installed or enabled; no broker/trading process, credential, remote, merge, or push exists.
+**Phase 4 status (2026-08-04):** calendar/session classification, append-only gap states, bounded oldest-first recovery, immutable universe activation, dry-run backfill, and additive schema v4 were implemented test-first. The [full Phase 4 review](../reviews/bist-minute-collector-phase4-opencode-review.md) returned **REVISE** with one Medium finding about exact historical Yahoo request windows. It was fixed test-first, the one permitted [focused Phase 4 confirmation](../reviews/bist-minute-collector-phase4-opencode-confirmation.md) returned **APPROVE** with no remaining Critical, High, or Medium finding, and all findings are reconciled in the [Phase 4 disposition](../reviews/bist-minute-collector-phase4-review-disposition.md). The [Phase 4 RED/GREEN evidence](../reviews/bist-minute-collector-phase4-red-green-evidence.md) records the gates.
+
+**Phase 5 status (2026-08-04):** the daily post-close one-shot, additive schema v5 run evidence, current-session recovery boundary, closed-session-only compaction, exact repository service/timer definitions, installer, status/operations commands, and operator documentation were implemented test-first. The [full Phase 5 review](../reviews/bist-minute-collector-phase5-opencode-review.md) returned **REVISE** with one Medium finding: consecutive daily runs double-fetched the current session and inflated recovered-gap counts. Its RED test reproduced 100 requests and 25,900 unresolved current-session gaps. Recovery is now bounded before the current session; GREEN is exactly 50 sweep requests and zero false recovered gaps. The single permitted [focused Phase 5 confirmation](../reviews/bist-minute-collector-phase5-opencode-confirmation.md) returned **APPROVE** with no remaining Critical, High, or Medium finding. The [Phase 5 disposition](../reviews/bist-minute-collector-phase5-review-disposition.md) and [RED/GREEN evidence](../reviews/bist-minute-collector-phase5-red-green-evidence.md) record the gate. Installation/enablement/runtime acceptance have not yet occurred; no broker/trading process, credential, remote, merge, or push exists.

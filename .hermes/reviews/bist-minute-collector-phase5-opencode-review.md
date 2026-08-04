@@ -1,0 +1,28 @@
+# Formal Phase 5 Implementation Review — daily post-close oneshot
+
+**Scope:** uncommitted Phase 5 per `/tmp/algo-daily-oneshot-correction.md` and the canonical plan (superseding the two-hour and ten-minute daemon designs). Evidence: `oneshot.py`, `service.py`, `systemd/*.service|timer`, updated `cli.py`/`store.py` (v5)/`recovery.py`/`collector.py`/`archive.py`, `OPERATIONS.md`, and tests `test_daily_oneshot.py`, `test_daily_oneshot_process.py`, `test_systemd_service.py`, `test_archive_eligibility.py`, `test_store.py`. Read-only; no edits, network, installs, or data-root changes. pytest cache `lastfailed={}`.
+
+## Verdict: REVISE (targeted)
+
+**One Medium finding remains (M1). No Critical or High findings remain.**
+
+### Medium
+
+**M1 — Every run after the first double-fetches the current session and inflates recovered-gap accounting.**
+
+- **Evidence:** `oneshot.py:250-263` runs `_recover` (startup_recovery) then `_sweep`; `recovery.py:214-235` starts recovery from the last durable cursor (previous session end), so on a second consecutive day the planner re-plans the *current* session as uncovered `PENDING` gaps and fetches it (`gaps.py`), then `_sweep` fetches the same session window again (`oneshot.py:146-158`). The fresh-run test asserts exactly 50 calls only because `startup_recovery` skips cursor-less routes (`recovery.py:216-218`), so the day-2+ double behavior is untested (`test_daily_oneshot_process.py:59-86`).
+- **Rationale:** 100 requests/day instead of 50 (still within caps, idempotent, no corruption), but each daily report shows the entire current session (~517 min × 50 ≈ 25,850) as `recovered_gaps` every day, making the gap-recovery metric misleading and contradicting the correction's "one exact post-close sweep" intent.
+- **Smallest test-first correction:** RED test for a second consecutive daily run (cursor at the previous session end) asserting the current session window is fetched exactly once and `recovered_gaps` counts only truly-missed past sessions; then constrain `startup_recovery`/the oneshot to plan recovery only up to the start of the sweep's session (or have the sweep skip windows the recovery just accounted).
+
+### Low (optional; none requires another review)
+
+- **L1 — Calendar snapshot expires 2026-12-31 but the timer fires every weekday forever.** `config/calendars/bist/2026.json` `effective_to=2026-12-31`; `systemd/bist-minute-collector.timer` `OnCalendar=Mon..Fri *-*-*`. From 2027-01-01 every scheduled run returns `FAILED_UNVERIFIED_CALENDAR` and exits 1 (`oneshot.py:86-92`, `cli.py:380-387`) until a new calendar snapshot is added. Correct fail-closed behavior, but OPERATIONS.md should state the year-boundary dependency.
+- **L2 — A single 429 fails the entire day.** `oneshot.py:264-278` requires all 50 symbols successful for `SUCCEEDED`; `test_daily_oneshot_process.py:89-119` codifies one throttled symbol → run `FAILED`, zero partitions, remaining symbols denied by the persisted cooldown. Conservative and self-healing next day, but wasteful; optionally note that a cooldown-then-retry within the run is deliberately excluded.
+- **L3 — `status` reports `NextElapseUSecRealtime` as a raw integer** (`service.py:198,225`), functional but not human-readable; acceptable, optionally format it.
+- **L4 — `run-once` installs no SIGTERM handler** (`oneshot.py`); a stopped/timed-out oneshot leaves the run `started`, marked `interrupted` on the next invocation (`store.py reconcile_started_runs`, `test_daily_oneshot.py:184-199`). Correct recoverable behavior; keep as documented.
+
+### Verified correct (no finding)
+
+Weekday 19:30 `Europe/Istanbul` user timer with `Persistent=true`, `AccuracySec=1min`, `WantedBy=timers.target`, paired with a `Type=oneshot` service (no `Restart`, `TimeoutStartSec=15min`, `TimeoutStopSec=45s`, `NoNewPrivileges`, `ProtectSystem=strict`, `UMask`, `RestrictAddressFamilies`, `LockPersonality`, `RestrictSUIDSGID`, absolute uv venv executable, task data root, no `EnvironmentFile`/secrets, no bare `python3` — asserted in `test_systemd_service.py:30-55`); zero Yahoo calls on authoritative closed dates and pre-close manual runs (`oneshot.py:81-119`, `test_daily_oneshot.py:55-71`); immutable 50-symbol universe enforced and activated (`oneshot.py:195-200`, `store.py activate_universe`); reconcile → recover → sweep → compact ordering with exact request accounting and `quick_check` gating (`oneshot.py:222-316`, `test_daily_oneshot.py:74-152`); max two workers / one writer and persisted cooldown/circuit/caps preserved through `DurableRequestPolicy`; 28-day cutoff and truthful beyond-retention gaps; no synthetic bars (exact-minute membership); cursor/cancellation/crash invariants via `reconcile_started_runs` and `finish_collector_run` state guard (`store.py:867-940`); closed-session-only deterministic publication via `compact_through` (`archive.py:191-198`, `test_archive_eligibility.py`); additive v4→v5 migration with `collector_runs` status table (`test_store.py:349-357`); last-attempt/last-success/last-completed-cycle status replacing heartbeat (`store.py collector_run_status`); installer isolation/rollback/hardening with no enable/start side effects (`test_systemd_service.py:57-137`); healthy inactive-service/waiting-timer status semantics (`service.py:138-151`, `test_systemd_service.py:84-100`); and truthful OPERATIONS.md with the unprovable observation gates listed. No secrets, no broker/trading code, and no overengineering beyond the correction's contract.
+
+Apply M1 (test-first) before relying on daily gap accounting; optionally address L1–L4. This was implementation review only — nothing was implemented, installed, enabled, or run.

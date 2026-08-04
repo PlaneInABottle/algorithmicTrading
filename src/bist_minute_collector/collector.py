@@ -147,7 +147,12 @@ class Collector:
         timeout = timeout_seconds or self.config.shutdown_timeout_seconds
         await asyncio.wait_for(cycle_done.wait(), timeout=timeout)
 
-    async def collect_once(self, *, now_utc: datetime | None = None) -> CollectionReport:
+    async def collect_once(
+        self,
+        *,
+        now_utc: datetime | None = None,
+        request_window: RequestWindow | None = None,
+    ) -> CollectionReport:
         if self._running:
             raise RuntimeError("a collection cycle is already active")
         self._running = True
@@ -237,7 +242,7 @@ class Collector:
         async def collect_route(route: SymbolRoute) -> None:
             nonlocal active_fetches, max_fetches, request_attempts, cancelled_requests
             cursor = self.store.cursor(self.provider.source, route.exchange_code, 60)
-            window = plan_overlap_window(
+            window = request_window or plan_overlap_window(
                 now_utc=cycle_now,
                 accounted_through_utc=(
                     cursor.accounted_through_utc if cursor is not None else None

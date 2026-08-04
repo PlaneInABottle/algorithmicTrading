@@ -7,7 +7,7 @@ import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -186,6 +186,18 @@ class ArchiveCompactor:
         self._utc_now = utc_now
 
     def compact_all(self) -> tuple[PublishedPartition, ...]:
+        return self._compact_keys(self._partition_keys())
+
+    def compact_through(self, through_date: date) -> tuple[PublishedPartition, ...]:
+        """Publish only sessions proven closed by the caller's calendar decision."""
+
+        return self._compact_keys(
+            tuple(
+                key for key in self._partition_keys() if date.fromisoformat(key[2]) <= through_date
+            )
+        )
+
+    def _partition_keys(self) -> tuple[tuple[str, int, str], ...]:
         keys = sorted(
             {
                 (
@@ -196,6 +208,11 @@ class ArchiveCompactor:
                 for bar in self.store.active_bars()
             }
         )
+        return tuple(keys)
+
+    def _compact_keys(
+        self, keys: tuple[tuple[str, int, str], ...]
+    ) -> tuple[PublishedPartition, ...]:
         if not keys:
             return ()
         self._guard_space()

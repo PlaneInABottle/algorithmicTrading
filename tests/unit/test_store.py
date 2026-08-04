@@ -14,6 +14,7 @@ from bist_minute_collector.store import (
     MIGRATION_V1,
     MIGRATION_V2,
     MIGRATION_V3,
+    MIGRATION_V4,
     SCHEMA_VERSION,
     CursorUpdate,
     IngestEnvelope,
@@ -198,10 +199,10 @@ def test_sqlite_uniqueness_wal_reopen_rollback_and_quick_check(tmp_path: Path) -
     with WriterStore(tmp_path) as reopened:
         assert reopened.active_bar_count() == 1
         assert reopened.quick_check() == "ok"
-        assert reopened.schema_version() == SCHEMA_VERSION == 4
-        assert reopened.migration_count() == 4
+        assert reopened.schema_version() == SCHEMA_VERSION == 5
+        assert reopened.migration_count() == 5
         reopened.apply_migrations()
-        assert reopened.migration_count() == 4
+        assert reopened.migration_count() == 5
         with pytest.raises(WriterAlreadyOpenError):
             WriterStore(tmp_path)
 
@@ -251,8 +252,8 @@ def test_version_one_database_upgrades_additively_and_repeatably(tmp_path: Path)
     connection.close()
 
     with WriterStore(tmp_path) as upgraded:
-        assert upgraded.schema_version() == 4
-        assert upgraded.migration_count() == 4
+        assert upgraded.schema_version() == 5
+        assert upgraded.migration_count() == 5
         assert upgraded.scalar("SELECT value FROM phase_one_sentinel") == "preserve-v1"
         assert (
             upgraded.scalar(
@@ -263,7 +264,7 @@ def test_version_one_database_upgrades_additively_and_repeatably(tmp_path: Path)
         signature = upgraded.schema_signature()
         upgraded.apply_migrations()
         assert upgraded.schema_signature() == signature
-        assert upgraded.migration_count() == 4
+        assert upgraded.migration_count() == 5
 
 
 def test_version_three_database_upgrades_to_gap_schema_without_losing_state(
@@ -292,8 +293,8 @@ def test_version_three_database_upgrades_to_gap_schema_without_losing_state(
     connection.close()
 
     with WriterStore(tmp_path) as upgraded:
-        assert upgraded.schema_version() == 4
-        assert upgraded.migration_count() == 4
+        assert upgraded.schema_version() == 5
+        assert upgraded.migration_count() == 5
         assert upgraded.provider_runtime("yahoo_chart").throttle_streak == 0
         assert (
             upgraded.scalar(
@@ -301,6 +302,59 @@ def test_version_three_database_upgrades_to_gap_schema_without_losing_state(
             )
             == "gap_events"
         )
+        assert upgraded.quick_check() == "ok"
+
+
+def test_version_four_database_upgrades_to_run_status_without_losing_gaps(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    database = state / "collector.sqlite3"
+    connection = sqlite3.connect(database)
+    migrations = (
+        (1, MIGRATION_V1),
+        (2, MIGRATION_V2),
+        (3, MIGRATION_V3),
+        (4, MIGRATION_V4),
+    )
+    for version, migration in migrations:
+        connection.executescript(migration)
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            (
+                version,
+                f"2026-08-0{version}T00:00:00Z",
+                hashlib.sha256(migration.encode()).hexdigest(),
+            ),
+        )
+    connection.execute(
+        "INSERT INTO gap_current VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "preserved-gap",
+            "yahoo-chart",
+            "ASELS.E",
+            60,
+            "2026-08-03T07:00:00Z",
+            "2026-08-03T07:01:00Z",
+            "pending",
+            0,
+            "2026-08-03T16:30:00Z",
+            "2026-08-03T16:30:00Z",
+            None,
+            "preserve",
+            "v4",
+        ),
+    )
+    connection.execute("PRAGMA user_version=4")
+    connection.commit()
+    connection.close()
+
+    with WriterStore(tmp_path) as upgraded:
+        assert upgraded.schema_version() == 5
+        assert upgraded.migration_count() == 5
+        assert upgraded.gap_current_row("preserved-gap") is not None
+        assert upgraded.integer_scalar("SELECT COUNT(*) FROM collector_runs") == 0
         assert upgraded.quick_check() == "ok"
 
 
