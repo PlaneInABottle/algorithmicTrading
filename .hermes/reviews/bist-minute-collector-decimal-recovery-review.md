@@ -2,9 +2,12 @@
 
 Verification date: 2026-08-04
 
-Reviewer session: `ses_03834f75effeZZa1No7tD39myV`  
-Model: `opencode-go/deepseek-v4-flash`  
-Agent: `plan`  
+Reviewer session: `ses_03834f75effeZZa1No7tD39myV`
+
+Model: `opencode-go/deepseek-v4-flash`
+
+Agent: `plan`
+
 Mode: read-only, one bounded confirmation
 
 ## Verbatim final review
