@@ -61,6 +61,8 @@ class HeadroomProjection:
     required_bytes: int
 
 
+PRICE_TYPE = pa.decimal128(38, 16)
+
 PARQUET_SCHEMA = pa.schema(
     [
         pa.field("source", pa.string(), nullable=False),
@@ -69,17 +71,17 @@ PARQUET_SCHEMA = pa.schema(
         pa.field("interval_seconds", pa.int32(), nullable=False),
         pa.field("bar_open_utc", pa.timestamp("us", tz="UTC"), nullable=False),
         pa.field("raw_source_timestamp", pa.int64(), nullable=False),
-        pa.field("open", pa.decimal128(38, 12), nullable=False),
-        pa.field("high", pa.decimal128(38, 12), nullable=False),
-        pa.field("low", pa.decimal128(38, 12), nullable=False),
-        pa.field("close", pa.decimal128(38, 12), nullable=False),
+        pa.field("open", PRICE_TYPE, nullable=False),
+        pa.field("high", PRICE_TYPE, nullable=False),
+        pa.field("low", PRICE_TYPE, nullable=False),
+        pa.field("close", PRICE_TYPE, nullable=False),
         pa.field("volume", pa.int64(), nullable=False),
         pa.field("observed_at_utc", pa.timestamp("us", tz="UTC"), nullable=False),
         pa.field("active_fetch_id", pa.string(), nullable=False),
     ],
     metadata={
-        b"collector_schema": b"bist-minute-bars-v1",
-        b"transformation_version": b"phase2-v1",
+        b"collector_schema": b"bist-minute-bars-v2",
+        b"transformation_version": b"decimal-scale-16-v2",
     },
 )
 
@@ -306,6 +308,11 @@ class ArchiveCompactor:
         except PublicationError as error:
             self.store.fail_manifest(attempt_id, str(error))
             raise
+        except pa.ArrowException as error:
+            self.store.fail_manifest(attempt_id, f"{error.__class__.__name__}: {error}")
+            raise PublicationError(
+                f"archive value cannot be represented losslessly: {error}"
+            ) from error
 
     @staticmethod
     def _publish_temp(temp: Path, final: Path, content_sha256: str) -> None:
@@ -380,6 +387,17 @@ class ArchiveCompactor:
         if manifest.state == "writing":
             if not temp.is_file():
                 raise PublicationError("writing manifest has no retained temp file")
+            if temp.stat().st_size == 0:
+                self.store.fail_manifest(
+                    manifest.attempt_id,
+                    "empty writing temp rebuilt from committed SQLite bars",
+                )
+                self._compact_partition(
+                    manifest.source,
+                    manifest.interval_seconds,
+                    manifest.session_date,
+                )
+                return
             expected_rows = _validate_parquet(temp)
             expected_hash = _sha256(temp)
             final = temp.parent / f"part-{expected_hash}.parquet"

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
+import pyarrow.parquet as pq  # type: ignore[import-untyped]
 import pytest
 
 from bist_minute_collector.archive import ArchiveCompactor
 from bist_minute_collector.store import IngestEnvelope, WriterStore
-from tests.helpers import corrected_result, fetch_result
+from tests.helpers import corrected_result, fetch_result, minute_bar
 
 
 def seed(root: Path) -> None:
@@ -50,6 +53,60 @@ def test_reopen_reconciles_each_publication_crash_boundary(tmp_path: Path, kill_
         path = tmp_path / active.final_path
         assert path.is_file()
         assert hashlib.sha256(path.read_bytes()).hexdigest() == active.content_sha256
+        assert reopened.quick_check() == "ok"
+
+
+def test_zero_byte_writing_manifest_is_rebuilt_from_committed_bars(tmp_path: Path) -> None:
+    source_value = Decimal("1.2100000381469727")
+    bar = replace(
+        minute_bar(),
+        open=source_value,
+        high=source_value,
+        low=source_value,
+        close=source_value,
+    )
+    with WriterStore(tmp_path) as store:
+        store.ingest(
+            IngestEnvelope(
+                fetch_id="committed-high-scale-source-value",
+                exchange_code="CANTE.E",
+                result=fetch_result(bar=bar),
+            )
+        )
+        temp = (
+            tmp_path
+            / "archive"
+            / "source=yahoo-chart"
+            / "interval=60"
+            / "session_date=2026-08-03"
+            / ".interrupted.parquet.tmp"
+        )
+        temp.parent.mkdir(parents=True)
+        temp.touch()
+        store.create_manifest(
+            "interrupted",
+            "yahoo-chart",
+            60,
+            "2026-08-03",
+            temp.relative_to(tmp_path).as_posix(),
+        )
+
+    with WriterStore(tmp_path) as reopened:
+        report = ArchiveCompactor(tmp_path, reopened).reconcile()
+
+        assert report.recovered == 1
+        assert report.failed == 0
+        assert reopened.active_manifest_count() == 1
+        failed = reopened.manifests(("failed",))
+        assert len(failed) == 1
+        assert failed[0].attempt_id == "interrupted"
+        assert failed[0].error == "empty writing temp rebuilt from committed SQLite bars"
+        assert temp.exists()
+        assert temp.stat().st_size == 0
+        active = reopened.active_manifests()[0]
+        assert active.final_path is not None
+        table = pq.read_table(tmp_path / active.final_path, columns=["close"])
+        assert table.column("close").to_pylist() == [source_value]
         assert reopened.quick_check() == "ok"
 
 

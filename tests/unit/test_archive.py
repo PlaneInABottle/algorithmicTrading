@@ -5,6 +5,7 @@ import inspect
 import os
 from dataclasses import replace
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
@@ -78,9 +79,36 @@ def test_partition_has_explicit_schema_zstd_and_deterministic_exchange_time_orde
         )
         assert rows == sorted(rows)
         assert table.schema.metadata == {
-            b"collector_schema": b"bist-minute-bars-v1",
-            b"transformation_version": b"phase2-v1",
+            b"collector_schema": b"bist-minute-bars-v2",
+            b"transformation_version": b"decimal-scale-16-v2",
         }
+
+
+def test_partition_preserves_full_source_decimal_scale_without_rescaling(
+    tmp_path: Path,
+) -> None:
+    source_value = Decimal("1.2100000381469727")
+    bar = replace(
+        minute_bar(),
+        open=source_value,
+        high=source_value,
+        low=source_value,
+        close=source_value,
+    )
+    with WriterStore(tmp_path) as store:
+        store.ingest(
+            IngestEnvelope(
+                fetch_id="high-scale-source-value",
+                exchange_code="CANTE.E",
+                result=fetch_result(bar=bar),
+            )
+        )
+
+        published = ArchiveCompactor(tmp_path, store).compact_all()[0]
+        table = pq.read_table(published.path, columns=["open", "high", "low", "close"])
+
+        for field in ("open", "high", "low", "close"):
+            assert table.column(field).to_pylist() == [source_value]
 
 
 def test_low_disk_preflight_writes_nothing_and_preserves_committed_data(tmp_path: Path) -> None:
