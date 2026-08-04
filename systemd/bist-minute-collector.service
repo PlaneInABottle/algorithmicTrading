@@ -19,4 +19,3 @@ ReadWritePaths=/home/mirza/.local/share/bist-minute-collector/data
 LockPersonality=true
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-

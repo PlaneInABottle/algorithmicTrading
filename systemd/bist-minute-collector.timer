@@ -9,4 +9,3 @@ Unit=bist-minute-collector.service
 
 [Install]
 WantedBy=timers.target
-
