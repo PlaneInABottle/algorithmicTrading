@@ -418,17 +418,75 @@ class YahooChartProvider:
 
     source = "yahoo_chart"
 
-    def __init__(self, *, timeout_seconds: float = 15.0) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 15.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._timeout_seconds = timeout_seconds
+        self._transport = transport
 
     async def fetch_one(self, symbol: str, window: RequestWindow) -> FetchResult:
-        """Fetch one bounded day; the result truthfully labels Yahoo's approximate range window."""
+        """Fetch one exact half-open historical window of no more than seven days."""
 
-        del window
-        batch = await self.fetch_many_one_day((symbol,), max_concurrency=1)
-        return batch.results[0]
+        if not YAHOO_SYMBOL_PATTERN.fullmatch(symbol):
+            raise ValueError("symbol must be an uppercase Yahoo .IS alias")
+        if window.duration <= timedelta(0) or window.duration > timedelta(days=7):
+            raise ValueError("historical request window must be positive and at most seven days")
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(self._timeout_seconds),
+            follow_redirects=False,
+            transport=self._transport,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "bist-minute-collector/0.1 (personal research)",
+            },
+        ) as client:
+            try:
+                response = await client.get(
+                    YAHOO_CHART_URL.format(symbol=symbol),
+                    params={
+                        "period1": int(window.start_utc.timestamp()),
+                        "period2": int(window.end_utc.timestamp()),
+                        "interval": "1m",
+                        "includePrePost": "false",
+                        "events": "div,splits",
+                    },
+                )
+            except httpx.TimeoutException:
+                return timeout_result(
+                    source="yahoo_chart",
+                    symbol=symbol,
+                    interval="1m",
+                    request_window=window,
+                    retrieved_at_utc=datetime.now(UTC),
+                    message=f"request exceeded {self._timeout_seconds:g} second timeout",
+                )
+            except httpx.RequestError as exc:
+                return _transport_result(
+                    symbol=symbol,
+                    request_window=window,
+                    retrieved_at_utc=datetime.now(UTC),
+                    message=f"{type(exc).__name__}: bounded request failed",
+                    request_window_semantics=RequestWindowSemantics.EXACT_UTC_WINDOW,
+                )
+        return parse_chart_response(
+            RawHttpResponse(
+                source="yahoo_chart",
+                symbol=symbol,
+                interval="1m",
+                request_window=window,
+                retrieved_at_utc=datetime.now(UTC),
+                status_code=response.status_code,
+                headers=response.headers,
+                body=response.content,
+                attempts=1,
+                request_window_semantics=RequestWindowSemantics.EXACT_UTC_WINDOW,
+            )
+        )
 
     async def fetch_many_one_day(
         self, symbols: Sequence[str], *, max_concurrency: int
@@ -449,6 +507,7 @@ class YahooChartProvider:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(self._timeout_seconds),
             follow_redirects=False,
+            transport=self._transport,
             headers={
                 "Accept": "application/json",
                 "User-Agent": "bist-minute-collector-phase1/0.1 (personal research)",

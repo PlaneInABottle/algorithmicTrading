@@ -11,12 +11,15 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import TYPE_CHECKING, Self
 from zoneinfo import ZoneInfo
 
 from .models import FetchResult, MinuteBar, OutcomeCode
 
-SCHEMA_VERSION = 3
+if TYPE_CHECKING:
+    from .snapshots import UniverseSnapshot
+
+SCHEMA_VERSION = 4
 FaultInjector = Callable[[str], None]
 
 
@@ -406,7 +409,67 @@ MIGRATION_V3 = """
 ALTER TABLE provider_runtime_state ADD COLUMN paused_until_utc TEXT;
 """
 
-MIGRATIONS = {1: MIGRATION_V1, 2: MIGRATION_V2, 3: MIGRATION_V3}
+MIGRATION_V4 = """
+CREATE TABLE IF NOT EXISTS gap_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL UNIQUE,
+    gap_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    exchange_code TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL,
+    start_utc TEXT NOT NULL,
+    end_utc TEXT NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    cause TEXT NOT NULL,
+    evidence_id TEXT NOT NULL,
+    observed_at_utc TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL,
+    recovery_cutoff_utc TEXT
+);
+CREATE INDEX IF NOT EXISTS gap_events_history ON gap_events(gap_id,event_id);
+CREATE TABLE IF NOT EXISTS gap_current (
+    gap_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    exchange_code TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL,
+    start_utc TEXT NOT NULL,
+    end_utc TEXT NOT NULL,
+    state TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL,
+    first_seen_utc TEXT NOT NULL,
+    last_seen_utc TEXT NOT NULL,
+    recovery_cutoff_utc TEXT,
+    cause TEXT NOT NULL,
+    evidence_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS gap_current_state_time
+ON gap_current(state,start_utc,exchange_code);
+CREATE TABLE IF NOT EXISTS universe_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    canonical_exchange_sha256 TEXT NOT NULL,
+    canonical_yahoo_sha256 TEXT NOT NULL,
+    effective_from TEXT NOT NULL,
+    effective_to TEXT NOT NULL,
+    retrieved_at_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS universe_members (
+    snapshot_id TEXT NOT NULL REFERENCES universe_snapshots(snapshot_id),
+    exchange_code TEXT NOT NULL,
+    yahoo_alias TEXT NOT NULL,
+    PRIMARY KEY(snapshot_id,exchange_code),
+    UNIQUE(snapshot_id,yahoo_alias)
+);
+CREATE TABLE IF NOT EXISTS universe_activations (
+    activation_id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL REFERENCES universe_snapshots(snapshot_id),
+    activated_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS universe_activations_time
+ON universe_activations(activated_at_utc,activation_id);
+"""
+
+MIGRATIONS = {1: MIGRATION_V1, 2: MIGRATION_V2, 3: MIGRATION_V3, 4: MIGRATION_V4}
 
 
 def _migration_statements(sql: str) -> Iterator[str]:
@@ -465,6 +528,66 @@ class StoreReader(AbstractContextManager["StoreReader"]):
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
         ).fetchall()
         return tuple((str(row["name"]), str(row["sql"])) for row in rows)
+
+    def gap_current_row(self, gap_id: str) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT * FROM gap_current WHERE gap_id=?", (gap_id,)
+        ).fetchone()
+        return None if row is None else {str(key): row[key] for key in row.keys()}
+
+    def gap_current_rows(
+        self, states: frozenset[str] | None = None
+    ) -> tuple[dict[str, object], ...]:
+        if states:
+            placeholders = ",".join("?" for _ in states)
+            rows = self._connection.execute(
+                f"SELECT * FROM gap_current WHERE state IN ({placeholders}) "
+                "ORDER BY start_utc,exchange_code,gap_id",
+                tuple(sorted(states)),
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                "SELECT * FROM gap_current ORDER BY start_utc,exchange_code,gap_id"
+            ).fetchall()
+        return tuple({str(key): row[key] for key in row.keys()} for row in rows)
+
+    def gap_event_rows(self, gap_id: str) -> tuple[dict[str, object], ...]:
+        rows = self._connection.execute(
+            "SELECT * FROM gap_events WHERE gap_id=? ORDER BY event_id", (gap_id,)
+        ).fetchall()
+        return tuple({str(key): row[key] for key in row.keys()} for row in rows)
+
+    def gap_event_count(self) -> int:
+        return self.integer_scalar("SELECT COUNT(*) FROM gap_events")
+
+    def active_universe_members(self) -> tuple[tuple[str, str], ...]:
+        row = self._connection.execute(
+            "SELECT snapshot_id FROM universe_activations "
+            "ORDER BY activated_at_utc DESC,activation_id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return ()
+        members = self._connection.execute(
+            "SELECT exchange_code,yahoo_alias FROM universe_members WHERE snapshot_id=? "
+            "ORDER BY exchange_code",
+            (str(row["snapshot_id"]),),
+        ).fetchall()
+        return tuple((str(item["exchange_code"]), str(item["yahoo_alias"])) for item in members)
+
+    def active_universe_snapshot_id(self) -> str | None:
+        row = self._connection.execute(
+            "SELECT snapshot_id FROM universe_activations "
+            "ORDER BY activated_at_utc DESC,activation_id DESC LIMIT 1"
+        ).fetchone()
+        return None if row is None else str(row["snapshot_id"])
+
+    def universe_activation_count(self) -> int:
+        return self.integer_scalar("SELECT COUNT(*) FROM universe_activations")
+
+    def universe_membership_count(self, snapshot_id: str) -> int:
+        return self.integer_scalar(
+            "SELECT COUNT(*) FROM universe_members WHERE snapshot_id=?", (snapshot_id,)
+        )
 
 
 class WriterStore(StoreReader):
@@ -753,6 +876,175 @@ class WriterStore(StoreReader):
             "SELECT COUNT(*) FROM provider_schema_drift WHERE source=? AND signature=?",
             (source, signature),
         )
+
+    def record_gap_event(
+        self,
+        *,
+        gap_id: str,
+        source: str,
+        exchange_code: str,
+        interval_seconds: int,
+        start_utc: datetime,
+        end_utc: datetime,
+        to_state: str,
+        cause: str,
+        evidence_id: str,
+        observed_at_utc: datetime,
+        recovery_cutoff_utc: datetime | None,
+        increment_attempt: bool,
+    ) -> bool:
+        if not gap_id or not source or not exchange_code.endswith(".E"):
+            raise ValueError("gap identity is required")
+        for instant in (start_utc, end_utc, observed_at_utc, recovery_cutoff_utc):
+            if instant is not None:
+                _utc_text(instant)
+        if end_utc <= start_utc or interval_seconds != 60:
+            raise ValueError("one-minute non-empty gap range is required")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = self._connection.execute(
+                "SELECT * FROM gap_current WHERE gap_id=?", (gap_id,)
+            ).fetchone()
+            from_state = str(current["state"]) if current is not None else None
+            current_attempts = int(current["attempt_count"]) if current is not None else 0
+            if increment_attempt and current is None:
+                raise StoreError("cannot record an attempt before gap discovery")
+            attempts = current_attempts + int(increment_attempt)
+            event_identity = "|".join(
+                (
+                    gap_id,
+                    from_state or "",
+                    to_state,
+                    cause,
+                    evidence_id,
+                    _utc_text(observed_at_utc),
+                    str(attempts),
+                )
+            )
+            event_key = hashlib.sha256(event_identity.encode()).hexdigest()
+            cursor = self._connection.execute(
+                "INSERT OR IGNORE INTO gap_events "
+                "(event_key,gap_id,source,exchange_code,interval_seconds,start_utc,end_utc,"
+                "from_state,to_state,cause,evidence_id,observed_at_utc,attempt_count,"
+                "recovery_cutoff_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    event_key,
+                    gap_id,
+                    source,
+                    exchange_code,
+                    interval_seconds,
+                    _utc_text(start_utc),
+                    _utc_text(end_utc),
+                    from_state,
+                    to_state,
+                    cause,
+                    evidence_id,
+                    _utc_text(observed_at_utc),
+                    attempts,
+                    (_utc_text(recovery_cutoff_utc) if recovery_cutoff_utc is not None else None),
+                ),
+            )
+            if cursor.rowcount == 0:
+                self._connection.rollback()
+                return False
+            first_seen = (
+                str(current["first_seen_utc"])
+                if current is not None
+                else _utc_text(observed_at_utc)
+            )
+            self._connection.execute(
+                "INSERT INTO gap_current "
+                "(gap_id,source,exchange_code,interval_seconds,start_utc,end_utc,state,"
+                "attempt_count,first_seen_utc,last_seen_utc,recovery_cutoff_utc,cause,evidence_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(gap_id) DO UPDATE SET state=excluded.state,"
+                "attempt_count=excluded.attempt_count,last_seen_utc=excluded.last_seen_utc,"
+                "recovery_cutoff_utc=excluded.recovery_cutoff_utc,cause=excluded.cause,"
+                "evidence_id=excluded.evidence_id",
+                (
+                    gap_id,
+                    source,
+                    exchange_code,
+                    interval_seconds,
+                    _utc_text(start_utc),
+                    _utc_text(end_utc),
+                    to_state,
+                    attempts,
+                    first_seen,
+                    _utc_text(observed_at_utc),
+                    (_utc_text(recovery_cutoff_utc) if recovery_cutoff_utc is not None else None),
+                    cause,
+                    evidence_id,
+                ),
+            )
+            self._connection.commit()
+            return True
+        except BaseException:
+            self._connection.rollback()
+            raise
+
+    def activate_universe(
+        self,
+        snapshot: UniverseSnapshot,
+        *,
+        activated_at_utc: datetime,
+        activation_id: str | None = None,
+    ) -> str:
+        _utc_text(activated_at_utc)
+        resolved_activation = (
+            activation_id
+            or hashlib.sha256(
+                f"{snapshot.snapshot_id}|{_utc_text(activated_at_utc)}".encode()
+            ).hexdigest()
+        )
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO universe_snapshots VALUES (?,?,?,?,?,?)",
+                (
+                    snapshot.snapshot_id,
+                    snapshot.canonical_exchange_sha256,
+                    snapshot.canonical_yahoo_sha256,
+                    snapshot.effective_from.isoformat(),
+                    snapshot.effective_to.isoformat(),
+                    _utc_text(snapshot.retrieved_at_utc),
+                ),
+            )
+            stored = self._connection.execute(
+                "SELECT * FROM universe_snapshots WHERE snapshot_id=?", (snapshot.snapshot_id,)
+            ).fetchone()
+            assert stored is not None
+            if (
+                str(stored["canonical_exchange_sha256"]) != snapshot.canonical_exchange_sha256
+                or str(stored["canonical_yahoo_sha256"]) != snapshot.canonical_yahoo_sha256
+            ):
+                raise StoreError("universe snapshot id conflicts with stored checksums")
+            for member in snapshot.members:
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO universe_members VALUES (?,?,?)",
+                    (
+                        snapshot.snapshot_id,
+                        member.exchange_code,
+                        member.alias_for("yahoo_chart"),
+                    ),
+                )
+            observed_count = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) FROM universe_members WHERE snapshot_id=?",
+                    (snapshot.snapshot_id,),
+                ).fetchone()[0]
+            )
+            if observed_count != len(snapshot.members):
+                raise StoreError("stored universe membership does not match immutable snapshot")
+            self._connection.execute(
+                "INSERT OR IGNORE INTO universe_activations VALUES (?,?,?)",
+                (resolved_activation, snapshot.snapshot_id, _utc_text(activated_at_utc)),
+            )
+            self._connection.commit()
+            return resolved_activation
+        except BaseException:
+            self._connection.rollback()
+            raise
 
     def ingest(self, envelope: IngestEnvelope) -> IngestReport:
         self._validate_envelope(envelope)

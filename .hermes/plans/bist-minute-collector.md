@@ -1,7 +1,7 @@
 # Durable BIST 50 One-Minute Collector — Implementation Plan
 
-Verification date: **2026-08-03 (Europe/Istanbul)**
-Status: **Phases 1–3 implemented and reviewed; Phase 4 and later phases are not authorized**
+Verification date: **2026-08-04 (Europe/Istanbul)**
+Status: **Phases 1–4 implemented and reviewed; the revised daily one-shot Phase 5 is authorized and active**
 Scope: current BIST 50 constituents, Yahoo one-minute data as a bounded free research source, and a provider-neutral path to licensed data later.
 
 This is the canonical implementation plan for the minute-data collector. It complements the broader [BIST backfill/backtest research](../../BIST_BACKTEST_SYSTEM_RESEARCH.md); it does not change that report's conclusions about data rights, historical depth, or evidentiary limits.
@@ -15,11 +15,11 @@ This is the canonical implementation plan for the minute-data collector. It comp
 
 ### Decision
 
-**[A] Build the smallest possible single-machine collector:** Python 3.12 managed by `uv`, typed domain models, `pytest`, an isolated Yahoo Chart provider adapter, one process, at most two concurrent fetches, one SQLite WAL writer, and daily Zstandard-compressed Parquet archives. Use a task-specific systemd **user service**, not a timer or PM2, for the long-running daemon.
+**[A] Build the smallest possible single-machine collector:** Python 3.12 managed by `uv`, typed domain models, `pytest`, an isolated Yahoo Chart provider adapter, one bounded process, at most two concurrent fetches, one SQLite WAL writer, and daily Zstandard-compressed Parquet archives. Run it once on weekdays at 19:30 `Europe/Istanbul` through a task-specific systemd **user timer** and matching `Type=oneshot` service. There is no daemon, PM2 process, container, system service, or always-running polling loop.
 
 **[V/T] This design can continuously preserve one-minute observations that Yahoo currently returns, survive process and machine restarts, recover recent gaps while the provider still retains them, and record older gaps truthfully. It cannot guarantee complete exchange data, infer trades from empty provider rows, or recover data that has rolled out of Yahoo's window.** Yahoo is an unofficial personal-research source with no completeness or uptime guarantee.
 
-Phase 1, Phase 2, and Phase 3 implementation were separately authorized and completed as recorded in §13. Phase 4 and every later implementation action remain behind an explicit user decision; no persistent collector, credentials, service, or continuous process exists.
+Phases 1–4 were separately authorized, completed, reviewed, and bounded as recorded in §13. The user then explicitly authorized the revised Phase 5 daily post-close one-shot implementation, its review, local phase commits, exact user-unit installation, timer enablement, and one manual acceptance invocation. No broker, trading process, credentials, remote, merge, or push is authorized.
 
 ## 2. Measured environment and provider facts
 
@@ -234,13 +234,16 @@ src/bist_minute_collector/
   store.py
   archive.py
   gaps.py
-  runner.py
+  recovery.py
+  oneshot.py
+  service.py
 tests/
   fixtures/yahoo_chart/
   unit/
   integration/
   network/
 systemd/bist-minute-collector.service
+systemd/bist-minute-collector.timer
 ```
 
 Runtime dependencies should initially be only `httpx` and `pyarrow`; use the standard library for SQLite, dataclasses, logging, hashing, locking, TOML reads, and `zoneinfo`. Development dependencies: `pytest`, `pytest-cov`, `mypy`, and `ruff`. `httpx.MockTransport` is sufficient for HTTP failure tests. Do not add a framework until a failing requirement proves it necessary. Source: [uv project documentation](https://docs.astral.sh/uv/) and [PyArrow Parquet documentation](https://arrow.apache.org/docs/python/parquet.html).
@@ -274,13 +277,13 @@ SQLite opens with WAL mode, `foreign_keys=ON`, a bounded busy timeout, and `sync
 - `cursor` — per source/symbol/interval last accounted window and last complete bar;
 - `gap` and `gap_event` — current status plus append-only transition history/evidence;
 - `partition_manifest` — pending/active/superseded archive files and hashes;
-- `daily_metric`, `daemon_state` — bounded operational counters and heartbeat.
+- `collector_run` — bounded last-attempt, last-success, last-completed-cycle, health, and request-accounting evidence.
 
 All ingestion for one envelope occurs in one `BEGIN IMMEDIATE` transaction: insert fetch outcome, validate/upsert bars and revisions, add/update gap evidence, then advance the accounted cursor. A killed process leaves the entire transaction committed or rolled back.
 
 ### 4.5 Raw/provenance retention
 
-Full duplicate responses are not retained every ten minutes forever. The auditable compromise is:
+Full duplicate responses are not retained for every recovery and daily sweep forever. The auditable compromise is:
 
 - retain request/response metadata and SHA-256 for **every** attempt;
 - retain compressed exact response bodies for the first successful fetch and the last successful fetch immediately before that session's post-close sweep/compaction per symbol/session for 400 days;
@@ -340,29 +343,22 @@ Daily `open` or the first Yahoo minute is not labeled an opening-auction price u
 - Re-fetching changed complete values appends `bar_revision(before, after, observed_at, fetch_id, reason=source_correction)` and replaces the active hot row. Correction order is deterministic by retrieval timestamp then request ID.
 - A later empty response never deletes a previously valid bar. It records contradictory provider evidence for review.
 
-## 6. Polling, recovery, and gap semantics
+## 6. Daily collection, recovery, and gap semantics
 
-### 6.1 Normal schedule and request budget
+### 6.1 Daily schedule and request budget
 
-**[A] Initial schedule:** during verified session/query periods, start one cycle every ten minutes. Each symbol request overlaps the previous **120 minutes**. Fetch at most two symbols concurrently, feed results to one writer, and apply a small launch jitter/pacing delay. Run one post-close seven-day reconciliation per symbol after a 45-minute source-delay grace period. Outside scheduled sessions, update heartbeat but make no routine Yahoo calls.
+**[A] Frozen schedule:** the systemd user timer invokes one bounded process on weekdays at 19:30 `Europe/Istanbul`, after the normal BIST close and a provider-lag allowance. The repository calendar is authoritative: a verified holiday, exceptional closed day, or other non-session date exits successfully before any Yahoo request. The one-shot first reconciles durable pending state and bounded recoverable gaps oldest-first, then runs one immutable 50-symbol post-close sweep, validates/accounts every request, compacts eligible closed sessions, records health/status, and exits.
 
-This collects one-minute granularity without claiming one-minute latency. Using the measured 510-slot **Yahoo provider grid span** for conservative request arithmetic—not asserting a 510-minute official continuous-trading session:
-
-- about 51 live cycles × 50 symbols = 2,550 requests/session;
-- plus about 50 post-close reconciliation calls = **2,600 requests/session**;
-- about 655,200 requests per 252-session year before retries;
-- a two-worker cycle should take roughly 25–35 seconds at the measured latency, well below ten minutes.
-
-These are planning figures, not Yahoo quotas. A hard initial cap of 3,000 requests per exchange session and 360 per rolling hour prevents runaway loops. The canary may lengthen polling to 15 minutes if 429s or latency show the initial budget is inappropriate. It must never shorten or add concurrency merely to chase lower lag.
+This preserves one-minute **bar granularity** for historical research; it does not claim one-minute or intraday delivery latency. A normal no-backlog session plans about 50 symbol requests before bounded retries. Recovery may add oldest-first windows, but the existing hard cap of 3,000 requests per exchange session, 360 per rolling hour, maximum concurrency two, persisted cooldown/circuit state, and one writer remain enforced. These are safeguards, not Yahoo quota or SLA claims.
 
 ### 6.2 Retry and circuit-breaker policy
 
 - Timeout/connection/HTTP 5xx: at most three attempts for that window using approximately 2, 10, and 30 seconds plus bounded jitter.
-- HTTP 429: honor `Retry-After`; otherwise use persisted cooldowns of 60 seconds, 2, 4, 8, then 15 minutes across later cycles—never a tight same-cycle loop.
+- HTTP 429: honor `Retry-After`; otherwise persist bounded cooldown state for the next scheduled/manual invocation—never sleep into a tight retry loop.
 - Three 429 responses in two minutes open a provider-wide 30-minute circuit and stop new calls while preserving recovery tasks.
 - HTTP 4xx other than known retention responses: no blind retry; classify and alert.
 - Malformed/schema-incompatible response: retain anomaly evidence, do not write bars, and pause the affected adapter after two symbols show the same drift.
-- Per-cycle retry and wall-time budgets prevent one symbol from blocking all others. Fair round-robin scheduling avoids starvation.
+- Per-run retry, request, and wall-time budgets prevent one symbol from blocking all others. Fair symbol ordering avoids starvation.
 
 ### 6.3 Durable cursors
 
@@ -398,71 +394,71 @@ Every transition appends timestamp, cause, fetch ID or calendar version, attempt
 5. Intersect those intervals with calendar query segments. Mark only officially proven closed intervals `outside-session`.
 6. Calculate `retrieval_time - 28 days` as the conservative Yahoo recovery cutoff. Record older unresolved intervals as `unrecoverable-beyond-retention` with the offline interval and evidence; do not issue futile requests or close them silently.
 7. Split recoverable work into windows of at most seven calendar days, process oldest-first with max concurrency two and global budgets, and make every replay idempotent.
-8. Run a two-hour overlap for the latest session, then enter the normal schedule.
-9. If recovery exceeds a cycle budget, interleave bounded recovery and live work fairly; persist the queue after each window.
+8. Run the current session's post-close sweep for every active symbol, account every terminal request, compact only eligible closed sessions, persist run health, and exit.
+9. If recovery exceeds the invocation budget, leave the remaining work durable and pending for the next invocation; do not keep a daemon alive.
 
 A shutdown lasting three days should recover automatically if Yahoo still exposes the interval. A shutdown exceeding 28 days must produce an explicit irrecoverable ledger interval even if a current request returns normally.
 
-## 7. Unattended operation with systemd user service
+## 7. Unattended operation with a systemd user timer
 
 ### 7.1 Service choice
 
-**[T]** User systemd is running and lingering is enabled on this machine. **[A]** Use one long-running `bist-minute-collector.service`; do not add a timer. The daemon already owns market-aware scheduling and persisted recovery. A timer would add overlapping-run and catch-up ambiguity. PM2 and Docker add no measured benefit.
+**[T]** User systemd is running and lingering is enabled on this machine. **[A]** Use `bist-minute-collector.timer` to invoke a matching `Type=oneshot` `bist-minute-collector.service`. Set `OnCalendar=Mon..Fri *-*-* 19:30:00 Europe/Istanbul` and `Persistent=true`. The timer remains enabled and waiting while a successful service normally becomes `inactive (dead)`. The application lock and systemd job serialization prevent overlapping writers. PM2, Docker, a system service, and a daemon are rejected.
 
 Planned unit location and runtime paths:
 
 ```text
 ~/.config/systemd/user/bist-minute-collector.service
-~/.config/bist-minute-collector/config.toml
-~/.config/bist-minute-collector/env          # optional, mode 0600, never committed
-~/.local/share/bist-minute-collector/         # SQLite, Parquet, retained response evidence
-~/.local/state/bist-minute-collector/         # lock, JSONL logs, health snapshot
+~/.config/systemd/user/bist-minute-collector.timer
+~/.local/share/bist-minute-collector/data/    # SQLite, Parquet, response and run evidence
 ```
 
 Planned unit responsibilities:
 
-- `After=` and `Wants=network-online.target`; startup never assumes the network is actually usable, so the daemon applies bounded retries;
-- `Type=simple`, an absolute virtual-environment executable, explicit working directory and data/config paths;
-- `EnvironmentFile=-%h/.config/bist-minute-collector/env`; optional absence is allowed, and the free Yahoo adapter needs no secret;
-- `Restart=on-failure`, `RestartSec=30s`, `StartLimitIntervalSec=10min`, `StartLimitBurst=5`;
-- `TimeoutStopSec=45s`, `KillSignal=SIGTERM`, and no privilege escalation;
-- `UMask=0077`, `NoNewPrivileges=true`, `PrivateTmp=true`, `ProtectSystem=strict`, with only the two task data/state roots writable; validate these directives with local systemd 255 before enablement;
-- `WantedBy=default.target`, which works with the verified `Linger=yes` after explicit enablement.
+- the service uses `After=` and `Wants=network-online.target`, but never assumes that target guarantees connectivity; internal retries remain bounded;
+- `Type=oneshot`, no `Restart=` loop, absolute uv-managed Python 3.12 console-script path, explicit working directory, and exact data root `/home/mirza/.local/share/bist-minute-collector/data`;
+- `TimeoutStartSec` bounds the entire invocation; `TimeoutStopSec=45s` and `KillSignal=SIGTERM` preserve the existing cancellation contract;
+- `UMask=0077`, `NoNewPrivileges=true`, `PrivateTmp=true`, `ProtectSystem=strict`, and only the task data root writable; validate the exact files with local systemd 255 before enablement;
+- the timer uses `Persistent=true` and `WantedBy=timers.target`; the verified `Linger=yes` permits boot catch-up without an interactive login, subject to a real reboot test;
+- no environment file or credential is needed by the free Yahoo adapter, and the rendered units contain no secret.
 
-Single-instance protection is layered: systemd has one unit instance; the process also takes a nonblocking advisory lock in its own state directory; SQLite permits one writer. Manual mutating commands refuse to run while the daemon owns the lock, except a controlled local RPC is explicitly deferred.
+Single-instance protection is layered: systemd serializes one service job, the process takes the existing nonblocking writer lock in the data root, and SQLite permits one writer. Manual mutating commands fail safely while the one-shot owns the lock.
 
 Source references: [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html), [systemd.exec](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html), and [loginctl/linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html).
 
 ### 7.2 Graceful and abrupt stop
 
-On `SIGTERM`, stop scheduling new HTTP requests, cancel or finish in-flight requests within their 15-second timeout, drain the single-writer queue, commit/rollback its current transaction, checkpoint health as `stopped`, and exit within 45 seconds. `SIGKILL` is tested separately: WAL recovery must restore the last committed state and reschedule any incomplete fetch without advancing its cursor.
+On `SIGTERM`, stop launching HTTP requests, cancel or finish in-flight requests within their 15-second timeout, drain the single-writer queue, commit/rollback its current transaction, persist the interrupted attempt, and exit within 45 seconds. `SIGKILL` is tested separately: WAL recovery must restore the last committed state and leave incomplete work recoverable without advancing its cursor.
 
 ### 7.3 Operator CLI
 
 All commands support `--json` for automation and redact secret-bearing values.
 
 ```text
-bist-minute-collector install-service   # copy/verify only this user unit; never enable/start
-bist-minute-collector start             # systemctl --user start only the named unit
-bist-minute-collector stop              # graceful stop only the named unit
-bist-minute-collector status            # unit + heartbeat + lag/gap/disk summary
+bist-minute-collector install-service   # render/verify/copy exactly the user service+timer; never enable/start
+bist-minute-collector start-now         # start exactly one service invocation
+bist-minute-collector enable-timer      # enable/start only the exact user timer
+bist-minute-collector disable-timer     # disable/stop only the exact user timer
+bist-minute-collector status            # last attempt/success/completion + timer next trigger + gaps/disk
+bist-minute-collector logs              # bounded journal view for the exact service
+bist-minute-collector run-once          # internal bounded daily workflow used by the service
 bist-minute-collector doctor            # config, lock, DB, schema, calendar, universe, disk, clock
-bist-minute-collector collect-once      # one bounded overlap cycle, no daemon
+bist-minute-collector collect-once      # lower-level bounded symbol sweep; explicit symbols required
 bist-minute-collector backfill          # explicit bounded source/symbol/time window; dry-run default
 bist-minute-collector gaps              # list/summarize ledger; never auto-hide
 bist-minute-collector compact           # idempotent eligible-day compaction
 bist-minute-collector export            # read-only UTC/session-filtered Parquet or CSV export
 ```
 
-During implementation via `uv`, equivalent development commands are `uv run bist-minute-collector ...`. `install-service` runs `systemd-analyze --user verify`, writes only the task unit atomically, and runs `systemctl --user daemon-reload`; enabling and starting remain separate explicit actions.
+During implementation via `uv`, equivalent development commands are `uv run bist-minute-collector ...`. `install-service` verifies repository-rendered units, atomically writes only the two exact user-unit paths, and runs `systemctl --user daemon-reload`; it never enables or starts. The latest user instruction separately authorizes the final exact timer enablement and one manual one-shot acceptance start after tests/review/commit.
 
-### 7.4 Logs, heartbeat, and alerts
+### 7.4 Logs, last-run health, and alerts
 
-- JSONL application logs rotate at 20 MiB × 10 files (200 MiB cap); journal output contains only concise lifecycle/warning/error records.
-- Heartbeat updates every 60 seconds with process start ID, version, universe/calendar versions, last successful cycle, writer queue depth, and lifecycle state.
+- Journal output contains bounded structured lifecycle, request-summary, health, warning, and error records; it never contains response bodies or secrets. Extra file-log rotation is deferred unless journal evidence proves it necessary.
+- Persist truthful `last_attempt`, `last_success`, and `last_completed_cycle` records with process/run ID, version, universe/calendar versions, request accounting, health results, and terminal state.
 - Persist per-symbol latest complete/finalized bar age, latest source timestamp, and last fetch outcome.
 - Persist counters for HTTP success/429/4xx/5xx/timeout/schema error, retries/circuit opens, inserted/unchanged/revised/quarantined bars, gap transitions, compactions, and bytes transferred/written.
-- `status` warns if heartbeat is older than 3 minutes during expected operation and is critical at 15 minutes; during a normal session it warns if per-symbol finalized-bar age exceeds 30 minutes and is critical over 45 minutes. These thresholds include the measured ~15-minute Yahoo lag. Any calibration must be preregistered from the two-/five-symbol canary **before** the first 50-symbol acceptance window; thresholds are never loosened after seeing that window's results.
+- `status` reports the timer enabled/active state and next trigger plus last-attempt/success/completion evidence. An `inactive (dead)` successful one-shot service is healthy when the timer is enabled and waiting; it is never misreported as a daemon failure.
 - Summarize unresolved gaps by state, age, symbol, and recoverability cutoff. “Zero gaps” is never manufactured by excluding unknowns.
 - Alert on request-cap exhaustion, circuit open, schema drift, stale calendar/universe, retained-response cap, failed checksum, corrupt DB/partition, and disk thresholds.
 - This local plan initially exposes health through `status --json`, logs, and systemd state. Email, ntfy, Prometheus, or a web UI are deferred.
@@ -503,9 +499,9 @@ The ten-year planned usage before the guard band is roughly 23 GiB. Against the 
 - Warn when collector-owned bytes exceed 30 GiB, filesystem free space falls below 20 GiB, or projected 30-day growth crosses either threshold.
 - Before each network cycle and compaction, calculate free bytes and required worst-case transaction/temp/WAL headroom.
 - Pause new fetches safely when collector-owned bytes reach 38 GiB, free space is below 10 GiB, or free space is below twice the measured worst compaction plus WAL requirement—whichever is most conservative.
-- Finish or roll back the current transaction, set heartbeat to `paused_low_disk`, retain all existing normalized/gap evidence, and exit nonzero only after state is durable.
+- Finish or roll back the current transaction, persist a `paused_low_disk` run result, retain all existing normalized/gap evidence, and exit nonzero only after state is durable.
 - Automated cleanup may remove only expired ordinary response-ring files and rotated logs that already satisfy retention. It never deletes canonical bars, revision history, active manifests, unresolved gaps, or anomaly evidence to keep running.
-- Resume only after `doctor` verifies space and an operator explicitly starts the service.
+- Resume on the next scheduled or explicit invocation only after `doctor` verifies space.
 
 ## 9. Test-driven implementation phases
 
@@ -637,56 +633,53 @@ uv run bist-minute-collector gaps --state pending,provider-empty/unverifiable,un
 
 **Stop gate:** fail if any missing interval disappears without a terminal/evidenced state, authoritative and fallback calendar confidence are conflated, or offline recovery exceeds provider/request bounds.
 
-### Phase 5 — systemd user service and boot recovery
+### Phase 5 — daily systemd user timer and one-shot recovery
 
-This phase requires a separate explicit authorization to install and enable the user unit.
+The latest user decision explicitly authorizes implementation/review, the scoped phase commit, installation of the exact two user units, `systemctl --user enable --now bist-minute-collector.timer`, and one manual one-shot acceptance invocation. It supersedes the earlier ten-minute and two-hour daemon proposals.
 
 **RED tests**
 
-- rendered unit uses only task paths, absolute executable, user privileges, validated hardening, and no embedded secret;
-- the rendered unit and every subprocess identify the pinned uv-managed Python 3.12 environment and never invoke bare `python3`;
-- `install-service` neither enables nor starts the unit;
-- second instance fails cleanly without a restart storm;
-- `SIGTERM`, `systemctl --user stop`, `kill -9`, and simulated abnormal exit preserve invariants;
-- unavailable network at start produces bounded backoff, not permanent failure or tight restarts;
-- stale heartbeat and failed restart limit appear in `status`.
+- repository-rendered service/timer use only exact task paths, an absolute uv-managed Python 3.12 executable, validated hardening, `Type=oneshot`, weekday 19:30 Istanbul scheduling, `Persistent=true`, and no embedded secret or bare `python3`;
+- `install-service` creates only the exact service and timer files and neither enables nor starts them;
+- verified holidays/non-session dates exit zero with zero provider calls; a pre-close manual invocation also refuses a premature sweep;
+- a normal invocation activates the immutable 50-symbol universe, reconciles pending publication/startup state, plans oldest-first bounded recovery, runs the post-close sweep, accounts every request, compacts eligible sessions, records health/status, and exits;
+- a second instance fails cleanly without a restart storm; `SIGTERM`, `systemctl --user stop`, `SIGKILL`, and simulated abnormal exit preserve storage/cursor invariants;
+- unavailable network produces bounded terminal evidence and persisted cooldown/backoff, not a tight restart loop;
+- `status` distinguishes a healthy inactive successful one-shot from timer failure and reports next trigger plus last-attempt/success/completion.
 
-**GREEN scope:** unit renderer/installer, start/stop/status wrappers restricted to the exact unit, structured log rotation, heartbeat, health checks, and boot-resume logic.
+**GREEN scope:** one bounded daily runner, additive durable run status, exact unit renderer/installer, `start-now`/timer enable-disable/status/log wrappers restricted to the exact unit names, journal-safe structured events, health checks, and `Persistent=true` boot catch-up semantics. No daemon or polling loop.
 
-**Failure injection:** invalid environment-file permissions, absent network, process kill, repeated exits hitting start limit, read-only data root, stale lock owner, and restart with pending compaction.
+**Failure injection:** authoritative closed day, pre-close invocation, absent network, 429/5xx/timeout, partial symbol failure, process kill, cancellation deadline, read-only/low-disk data root, stale lock owner, pending compaction, failed health check, and installer partial write.
 
 **Verification commands**
 
 ```bash
 uv run bist-minute-collector install-service --dry-run
-systemd-analyze --user verify systemd/bist-minute-collector.service
+systemd-analyze --user verify systemd/bist-minute-collector.service systemd/bist-minute-collector.timer
+uv run bist-minute-collector run-once --data-root "$TEST_DATA_ROOT" --dry-run
 uv run bist-minute-collector install-service
 systemctl --user daemon-reload
+systemctl --user enable --now bist-minute-collector.timer
 systemctl --user start bist-minute-collector.service
-systemctl --user status bist-minute-collector.service --no-pager
+systemctl --user show bist-minute-collector.service -p ActiveState -p SubState -p Result -p NRestarts
+systemctl --user show bist-minute-collector.timer -p ActiveState -p SubState -p NextElapseUSecRealtime
 journalctl --user-unit=bist-minute-collector.service --since=-10min --no-pager
+systemctl --user is-enabled bist-minute-collector.timer
 uv run bist-minute-collector status --json
-systemctl --user stop bist-minute-collector.service
 ```
 
-Actual enablement, if separately authorized:
+**Rollback:** `systemctl --user disable --now bist-minute-collector.timer`, stop the exact service if active, remove only `~/.config/systemd/user/bist-minute-collector.service` and `.timer`, then `systemctl --user daemon-reload`. Keep all data unless the user separately authorizes deletion.
 
-```bash
-systemctl --user enable --now bist-minute-collector.service
-```
+**Stop gate:** unit verification, foreground one-shot tests, kill/restart tests, closed-day/pre-close no-network tests, installer isolation, exact review, and a phase commit must pass before enablement. Acceptance then requires timer enabled/waiting, manual service exit success, `quick_check=ok`, request/cursor/gap/partition accounting, no restart loop, no residual collector process, and no broker/trading process. Boot/login-independent catch-up remains unverified until an actual reboot and missed schedule are observed.
 
-**Rollback:** `systemctl --user disable --now bist-minute-collector.service`, remove only `~/.config/systemd/user/bist-minute-collector.service`, then `systemctl --user daemon-reload`. Keep data unless the user separately authorizes deletion.
-
-**Stop gate:** unit verification, foreground tests, kill/restart tests, and user-session tests must pass before enablement. Boot/login-independent recovery remains unverified until the user authorizes and observes an actual reboot.
-
-### Phase 6 — Real canary and continuous operation
+### Phase 6 — Daily observation and canary evidence
 
 Roll out without changing test thresholds after seeing results:
 
-1. `ASELS.IS` and `THYAO.IS`: two complete live trading sessions, one graceful restart, and one forced crash/recovery.
-2. Add `AKBNK.IS`, `TUPRS.IS`, and `DSTKF.IS`: three complete live sessions plus a weekend restart simulation.
-3. All 50: at least **five consecutive trading sessions**, one weekend, a process crash, and a machine reboot if authorized.
-4. Continue for weeks only after review of the five-session report and an explicit start/enable decision.
+1. Verify the installed 50-symbol one-shot on two eligible sessions, including one manual invocation and timer waiting state.
+2. Observe at least five consecutive scheduled trading sessions plus a weekend/holiday skip and review daily accounting before treating operation as reliable.
+3. Observe a missed schedule/reboot catch-up when safely possible; preserve all gap evidence if Yahoo retention prevents recovery.
+4. Continue daily historical collection for weeks while reporting rather than retroactively changing thresholds.
 
 **Acceptance thresholds**
 
@@ -694,13 +687,14 @@ Roll out without changing test thresholds after seeing results:
 - zero duplicate primary keys and deterministic identical replay results;
 - every request has a terminal fetch record; every absent expected query slot has a current gap state/evidence;
 - every changed price row has exactly one ordered correction chain; no later empty response deletes it;
-- during ordinary open sessions, p95 finalized-bar age ≤30 minutes and p99 ≤45 minutes, excluding explicitly recorded provider-wide incidents; thresholds are reported, not retroactively loosened;
-- p95 50-symbol collection cycle ≤2 minutes, maximum concurrency two, request caps never exceeded;
-- HTTP 429 under 1% of attempts during the observation window, with 100% honoring cooldown; at or above 1% pauses scale-up and triggers a longer poll experiment;
-- recoverable gaps receive the scheduled overlap and post-close attempts; zero gaps are silently reclassified or aged out;
+- every verified open session receives one terminal daily run record; verified closed dates make zero Yahoo calls and exit successfully;
+- the 50-symbol post-close sweep completes within its declared one-shot deadline, maximum concurrency two, one writer, and request caps never exceeded;
+- daily status truthfully reports last attempt, last success, last completed sweep, provider outcomes, timer next trigger, and unresolved gaps; no near-real-time freshness claim is made;
+- HTTP 429 outcomes honor persisted cooldown and are not retried in a tight loop;
+- recoverable gaps receive bounded oldest-first work; zero gaps are silently reclassified or aged out;
 - a three-day offline simulation recovers all provider-returned bars; a 35-day simulation records the entire irrecoverable interval truthfully;
 - SQLite `quick_check` passes, every active Parquet checksum/row count reconciles, and no orphan active manifest exists after crashes;
-- average collector CPU below 5% of one core, RSS below 250 MiB, persistent growth below 250 MiB per normal session, and no low-disk threshold crossed;
+- average one-shot CPU/RSS and persistent daily growth remain within the storage/resource budgets, and no low-disk threshold is crossed;
 - calendar/universe checksums match active manifests, and source staleness is visible;
 - logs and exports contain no credentials or raw secret-bearing environment values.
 
@@ -709,23 +703,22 @@ Roll out without changing test thresholds after seeing results:
 ```bash
 uv run pytest -q
 uv run pytest -m network tests/network/test_yahoo_smoke.py -q
-uv run bist-minute-collector doctor --deep
+uv run bist-minute-collector doctor --data-root /home/mirza/.local/share/bist-minute-collector/data
 uv run bist-minute-collector status --json
 uv run bist-minute-collector gaps --json
-uv run bist-minute-collector compact --check
-uv run bist-minute-collector export --symbols ASELS.IS,THYAO.IS --from <UTC> --to <UTC> --format parquet
-systemctl --user show bist-minute-collector.service -p ActiveState -p SubState -p NRestarts
-systemctl --user is-enabled bist-minute-collector.service
+systemctl --user show bist-minute-collector.service -p ActiveState -p SubState -p Result -p NRestarts
+systemctl --user show bist-minute-collector.timer -p ActiveState -p SubState -p NextElapseUSecRealtime
+systemctl --user is-enabled bist-minute-collector.timer
 ```
 
-**Rollback:** stop/disable only the task unit, preserve and checksum the dataset, return to foreground `collect-once`, and review canary evidence. Do not discard gaps to make metrics pass.
+**Rollback:** disable/stop only the exact timer and service, preserve and checksum the dataset, return to explicit `run-once --dry-run`/`collect-once`, and review evidence. Do not discard gaps to make metrics pass.
 
-**Stop gate:** continuous unattended collection begins only after all 50-symbol thresholds pass for the minimum window and the user explicitly authorizes enablement. A real reboot, real market sessions, naturally occurring source corrections/outages, an actual holiday/half-day, and survival for weeks cannot be proven by unit tests; they remain separately observed evidence.
+**Stop gate:** initial enablement is authorized only after Phase 5 tests/review/commit. Longer-term confidence still requires real scheduled sessions, a real reboot or missed trigger, naturally occurring source corrections/outages, an actual holiday/half-day, and survival for weeks; unit tests cannot prove those facts.
 
 ## 10. Git, security, and operating boundaries
 
-- **[T]** Phase 1 authorization initialized this directory as a local Git repository on `main`; it still has no commits, staged files, or remotes.
-- **[A]** A secret-safe `.gitignore` now exists. Staging, committing, adding a remote, and pushing remain separate future approvals.
+- **[T]** Phase 1 initialized a local Git repository on `main`; commits `d098be5` and `02629f2` contain the reviewed Phase 1–3 boundaries. No remote or push exists.
+- **[A]** Secret-safe ignore rules exist. The user authorized small scoped local phase commits; adding a remote, merge, push, reset, clean, force, and history rewriting remain forbidden.
 - Source contains no credentials. Free Yahoo needs none. A later licensed provider uses a mode-0600 environment file or OS credential facility, never CLI arguments or logs.
 - The service runs as the current unprivileged user. No `sudo`, system service, open port, broker connection, or network listener is required.
 - Exports are explicit and read-only; they include source, universe/calendar, schema/transformation, and partition-manifest versions.
@@ -735,13 +728,13 @@ systemctl --user is-enabled bist-minute-collector.service
 
 ### Decisions frozen by this plan
 
-- one-minute is bar granularity; ten minutes is initial polling cadence;
+- one-minute is bar granularity; one weekday 19:30 `Europe/Istanbul` post-close invocation is the operating cadence;
 - Yahoo Chart is an isolated, unofficial free adapter; licensed sources are future adapters;
 - SQLite WAL plus daily Parquet, single writer, two bounded fetch workers;
 - UTC canonical timestamps plus versioned Europe/Istanbul session metadata;
 - immutable universe/calendar snapshots and visible correction/gap histories;
 - 28-day conservative Yahoo recovery horizon and seven-day maximum request window;
-- systemd user service with no timer, PM2, container, or privilege escalation;
+- systemd user timer plus matching `Type=oneshot` service; no daemon, PM2, container, system service, or privilege escalation;
 - 40 GiB total cap with safe pause thresholds;
 - no synthetic bars under any circumstance.
 
@@ -753,11 +746,11 @@ systemctl --user is-enabled bist-minute-collector.service
 4. **[U] Calendar/suspensions:** Phase 1 froze the sourced current 2026 schedule and holiday transcription, but symbol-level suspensions and historical calendar/rule states still require later official-source work.
 5. **[U] Boot evidence:** `Linger=yes` and unit semantics support boot resume, but only an actual reboot proves this machine's end-to-end behavior.
 6. **[U] Long observation:** weeks-long uptime, natural 429/outage/correction behavior, and holiday/half-day behavior cannot be established in this planning turn.
-7. **[A] Git and service actions:** local initialization and the authorized phase-boundary commits are complete. Unit installation, enablement, continuous start, remotes, merge, and push remain distinct future approvals.
+7. **[A] Git and service actions:** local initialization and reviewed Phase 1–3 commits are complete. The Phase 4 and daily Phase 5 commits, exact two-user-unit installation, timer enablement, and one manual acceptance run are authorized after their gates/reviews. Remotes, merge, push, reset, clean, force, and history rewriting remain forbidden.
 
 ### Next implementation gate
 
-Phases 1–3 are complete. There is no authorized next implementation command. The next gate is an explicit user decision authorizing **Phase 4 RED tests** for calendar/session classification, append-only gap states, bounded recent recovery, and truthful beyond-retention evidence. The first planned command is `uv run pytest tests/unit/test_calendar.py tests/unit/test_gaps.py -q`; it has not been run. Gap recovery, service work, persistent collection, remotes, merge, and push remain stopped until that decision.
+Phase 4 is complete, reviewed, and ready for its authorized local commit. The active next gate is the revised **Phase 5 daily one-shot RED suite**: repository-rendered timer/service semantics, closed-date zero-network behavior, bounded workflow ordering, durable last-run status, installer isolation, and one-shot process recovery. Implementation must remain uninstalled and disabled until its gates and exact review pass.
 
 ## 12. Source register
 
@@ -791,4 +784,6 @@ The [full review](../reviews/bist-minute-collector-opencode-review.md), [focused
 
 The [full Phase 1 review](../reviews/bist-minute-collector-phase1-opencode-review.md), [Phase 1 disposition](../reviews/bist-minute-collector-phase1-review-disposition.md), [full Phase 2 review](../reviews/bist-minute-collector-phase2-opencode-review.md), [Phase 2 disposition](../reviews/bist-minute-collector-phase2-review-disposition.md), and [Phase 2 RED/GREEN evidence](../reviews/bist-minute-collector-phase2-red-green-evidence.md) are retained. No focused Phase 2 confirmation was requested because only Low findings were fixed, while the user's confirmation condition applies only to Critical, High, or Medium fixes.
 
-The [full Phase 3 review](../reviews/bist-minute-collector-phase3-opencode-review.md) returned **REVISE** with one Medium and six Low findings. M1 and L1 were fixed test-first; all findings are reconciled in the [Phase 3 disposition](../reviews/bist-minute-collector-phase3-review-disposition.md). Because M1 required a fix, the single permitted [focused Phase 3 confirmation](../reviews/bist-minute-collector-phase3-opencode-confirmation.md) ran in the same session/model/agent and returned **APPROVE**, explicitly with no remaining Critical, High, or Medium finding. The [Phase 3 RED/GREEN evidence](../reviews/bist-minute-collector-phase3-red-green-evidence.md) records the exact gates and bounded live request accounting. Phase 4 and every later phase remain unauthorized; no service, credentials, persistent collector, broker connection, remote, merge, or push exists.
+The [full Phase 3 review](../reviews/bist-minute-collector-phase3-opencode-review.md) returned **REVISE** with one Medium and six Low findings. M1 and L1 were fixed test-first; all findings are reconciled in the [Phase 3 disposition](../reviews/bist-minute-collector-phase3-review-disposition.md). Because M1 required a fix, the single permitted [focused Phase 3 confirmation](../reviews/bist-minute-collector-phase3-opencode-confirmation.md) ran in the same session/model/agent and returned **APPROVE**, explicitly with no remaining Critical, High, or Medium finding. The [Phase 3 RED/GREEN evidence](../reviews/bist-minute-collector-phase3-red-green-evidence.md) records the exact gates and bounded live request accounting.
+
+**Phase 4 status (2026-08-04):** calendar/session classification, append-only gap states, bounded oldest-first recovery, immutable universe activation, dry-run backfill, and additive schema v4 were implemented test-first. The [full Phase 4 review](../reviews/bist-minute-collector-phase4-opencode-review.md) returned **REVISE** with one Medium finding about exact historical Yahoo request windows. It was fixed test-first, the one permitted [focused Phase 4 confirmation](../reviews/bist-minute-collector-phase4-opencode-confirmation.md) returned **APPROVE** with no remaining Critical, High, or Medium finding, and all findings are reconciled in the [Phase 4 disposition](../reviews/bist-minute-collector-phase4-review-disposition.md). The [Phase 4 RED/GREEN evidence](../reviews/bist-minute-collector-phase4-red-green-evidence.md) records the gates. The revised daily Phase 5 is authorized but not yet installed or enabled; no broker/trading process, credential, remote, merge, or push exists.

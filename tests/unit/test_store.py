@@ -12,6 +12,8 @@ import pytest
 from bist_minute_collector.models import FetchResult, OutcomeCode, ProviderOutcome
 from bist_minute_collector.store import (
     MIGRATION_V1,
+    MIGRATION_V2,
+    MIGRATION_V3,
     SCHEMA_VERSION,
     CursorUpdate,
     IngestEnvelope,
@@ -196,10 +198,10 @@ def test_sqlite_uniqueness_wal_reopen_rollback_and_quick_check(tmp_path: Path) -
     with WriterStore(tmp_path) as reopened:
         assert reopened.active_bar_count() == 1
         assert reopened.quick_check() == "ok"
-        assert reopened.schema_version() == SCHEMA_VERSION == 3
-        assert reopened.migration_count() == 3
+        assert reopened.schema_version() == SCHEMA_VERSION == 4
+        assert reopened.migration_count() == 4
         reopened.apply_migrations()
-        assert reopened.migration_count() == 3
+        assert reopened.migration_count() == 4
         with pytest.raises(WriterAlreadyOpenError):
             WriterStore(tmp_path)
 
@@ -249,8 +251,8 @@ def test_version_one_database_upgrades_additively_and_repeatably(tmp_path: Path)
     connection.close()
 
     with WriterStore(tmp_path) as upgraded:
-        assert upgraded.schema_version() == 3
-        assert upgraded.migration_count() == 3
+        assert upgraded.schema_version() == 4
+        assert upgraded.migration_count() == 4
         assert upgraded.scalar("SELECT value FROM phase_one_sentinel") == "preserve-v1"
         assert (
             upgraded.scalar(
@@ -261,7 +263,45 @@ def test_version_one_database_upgrades_additively_and_repeatably(tmp_path: Path)
         signature = upgraded.schema_signature()
         upgraded.apply_migrations()
         assert upgraded.schema_signature() == signature
-        assert upgraded.migration_count() == 3
+        assert upgraded.migration_count() == 4
+
+
+def test_version_three_database_upgrades_to_gap_schema_without_losing_state(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    database = state / "collector.sqlite3"
+    connection = sqlite3.connect(database)
+    for version, migration in ((1, MIGRATION_V1), (2, MIGRATION_V2), (3, MIGRATION_V3)):
+        connection.executescript(migration)
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            (
+                version,
+                f"2026-08-0{version}T00:00:00Z",
+                hashlib.sha256(migration.encode()).hexdigest(),
+            ),
+        )
+    connection.execute(
+        "INSERT INTO provider_runtime_state VALUES (?,?,?,?,?,?,?)",
+        ("yahoo_chart", None, None, 0, None, "2026-08-03T00:00:00Z", None),
+    )
+    connection.execute("PRAGMA user_version=3")
+    connection.commit()
+    connection.close()
+
+    with WriterStore(tmp_path) as upgraded:
+        assert upgraded.schema_version() == 4
+        assert upgraded.migration_count() == 4
+        assert upgraded.provider_runtime("yahoo_chart").throttle_streak == 0
+        assert (
+            upgraded.scalar(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name='gap_events'"
+            )
+            == "gap_events"
+        )
+        assert upgraded.quick_check() == "ok"
 
 
 def test_retention_prunes_ordinary_bodies_but_never_anomaly_or_correction(

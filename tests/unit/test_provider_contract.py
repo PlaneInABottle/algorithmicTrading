@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from datetime import UTC, datetime, timedelta
@@ -7,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from bist_minute_collector.models import (
@@ -15,7 +17,7 @@ from bist_minute_collector.models import (
     RequestWindow,
     RequestWindowSemantics,
 )
-from bist_minute_collector.provider import parse_chart_response, timeout_result
+from bist_minute_collector.provider import YahooChartProvider, parse_chart_response, timeout_result
 
 ROOT = Path(__file__).parents[2]
 FIXTURES = ROOT / "tests/fixtures/yahoo_chart"
@@ -237,3 +239,49 @@ def test_fixture_requests_have_exact_window_semantics() -> None:
     result = parse_chart_response(_response(_fixture("ASELS.IS-1d-1m-2026-08-03.sanitized.json")))
 
     assert result.request_window_semantics is RequestWindowSemantics.EXACT_UTC_WINDOW
+
+
+def test_historical_fetch_honors_exact_bounded_period_window() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            content=_fixture("ASELS.IS-1d-1m-2026-08-03.sanitized.json"),
+            request=request,
+        )
+
+    window = RequestWindow(
+        datetime(2026, 8, 3, 6, 40, tzinfo=UTC),
+        datetime(2026, 8, 3, 15, 19, tzinfo=UTC),
+    )
+    result = asyncio.run(
+        YahooChartProvider(transport=httpx.MockTransport(handler)).fetch_one("ASELS.IS", window)
+    )
+
+    assert len(requests) == 1
+    query = requests[0].url.params
+    assert query["period1"] == str(int(window.start_utc.timestamp()))
+    assert query["period2"] == str(int(window.end_utc.timestamp()))
+    assert "range" not in query
+    assert result.request_window == window
+    assert result.request_window_semantics is RequestWindowSemantics.EXACT_UTC_WINDOW
+
+
+def test_historical_fetch_rejects_more_than_seven_days_without_request() -> None:
+    requested = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested = True
+        return httpx.Response(500, request=request)
+
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    with pytest.raises(ValueError, match="seven days"):
+        asyncio.run(
+            YahooChartProvider(transport=httpx.MockTransport(handler)).fetch_one(
+                "ASELS.IS", RequestWindow(start, start + timedelta(days=8))
+            )
+        )
+    assert not requested

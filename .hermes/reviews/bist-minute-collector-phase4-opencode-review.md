@@ -1,0 +1,34 @@
+# Formal Phase 4 Implementation Review — `bist-minute-collector`
+
+Reviewer session: `ses_03834f75effeZZa1No7tD39myV`
+Model: `opencode-go/deepseek-v4-flash`
+Agent: `plan`
+Review mode: read-only
+
+**Scope:** uncommitted Phase 4 (calendar engine, gap ledger, recovery, universe activation, backfill/gaps CLI, v3→v4 migration) per `.hermes/plans/bist-minute-collector.md` and the authorized workflow in `/tmp/algo-start-continuous.md` + `/tmp/algo-cadence-correction.md`. The two-hour session-aware cadence is correctly **not** part of Phase 4 (it applies to the Phase 5 daemon); one-minute storage is unchanged. Evidence: read-only inspection of `calendar_engine.py`, `gaps.py`, `recovery.py`, `store.py` (v4), `cli.py`, `test_calendar.py`, `test_gaps.py`, `test_offline_recovery.py`, `test_store.py`, Git state, and pytest cache (`lastfailed={}`, all Phase 4 tests collected).
+
+## Verdict: REVISE (targeted)
+
+**One Medium finding remains (M1). No Critical or High findings remain.**
+
+### Medium
+
+**M1 — Historical backfill/recovery cannot target past sessions through the real provider (window discarded), and this integration is untested.**
+
+- **Evidence:** `provider.py:426-431` — `fetch_one` does `del window` and always requests `range=1d`; `recovery.py:106` passes `task.window` to `fetch_one`, which ignores it; `cli.py:220-221` wires the real `YahooChartProvider` into `RecoveryEngine` for `backfill --execute`; `recovery.py:180` recovers a gap only when its exact minute appears in the returned bars. Since `range=1d` returns the current day, past-session gaps never match.
+- **Rationale:** `backfill --execute --from <past> --to <past>` and `startup_recovery` after a multi-day outage silently fetch only the current day, leave the target historical gaps `pending` (never `recovered`), and still exit 0 with a "successful" report; current-day bars are re-ingested idempotently (no fabrication or corruption, but the feature under-delivers). The plan's "a shutdown lasting three days should recover automatically if Yahoo still exposes the interval" (§6.5) is unachievable with this provider call. The recovery logic itself is correct and tested only against a window-honoring fake provider (`test_offline_recovery.py`); the real-provider integration is untested.
+- **Smallest test-first correction:** a RED test driving `backfill --execute` over a past window through a provider that returns today's bars (simulating `range=1d`) and asserting the target gaps are not falsely recovered and the run/exit signals the limitation; then either (a) make `fetch_one` honor the requested `range`/`period` window within the 30-day retention and 8-day-per-request limits, or (b) have `backfill` refuse past-window execution for the free provider with an explicit truthful message rather than silently fetching the current day.
+
+### Low (optional; none requires another review)
+
+- **L1 — `OUTSIDE_SESSION` is never produced and cannot be reclassified.** `RecoveryPlanner` skips closed sessions entirely (no gap rows; `gaps.py:301-308`), and `_apply_result` never transitions to `OUTSIDE_SESSION` (`recovery.py:167-207`); the plan's "terminal unless a calendar correction creates a new version and explicit reclassification event" (§6.4) is unimplemented and `OUTSIDE_SESSION` is terminal (`gaps.py:39`). Harmless now (the state is dormant) but a corrected calendar cannot reopen wrongly-closed minutes.
+- **L2 — Recovery advances the cursor only for exact-window results.** `recovery.py:119-130` sets a cursor only when `EXACT_UTC_WINDOW` and SUCCESS; with the approximate `range=1d` provider the cursor never advances, so startup recovery replans the same window each run (idempotent, bounded, non-progressing). Consistent with conservatism; document it before Phase 5 relies on cursor-driven recovery.
+- **L3 — Gaps are minute-granular with no range-compression.** The plan (§6.4) allows compressing contiguous identical-evidence minutes; a full 28-day, 50-symbol backfill enumerates ~480k `GapRange`/rows. Bounded but heavy; range-compression is a noted optimization, not a defect.
+- **L4 — Universe activation is wired only to `backfill --execute`.** `cli.py:220` is the sole `activate_universe` call; `collect-once` and startup never register the active snapshot, so a root used only via collect-once has empty `universe_activations`. Phase 5's daemon should register the active universe at startup.
+- **L5 — `backfill` fixes `now` once for all routes** (`cli.py:187`), so a long multi-symbol run's 28-day cutoff uses the start-of-run clock. Minor and consistent.
+
+### Verified correct (no finding)
+
+Versioned authoritative-vs-unverified calendar semantics with `UNVERIFIED_WEEKDAY` fallback that never proves outside-session (`calendar_engine.py:60-107`, `test_calendar.py:102-111`); weekend/closed-holiday/half-day/full-day classification with correct UTC window bounds and Istanbul DST round-trips (`test_calendar.py:86-124`); all five gap states matching the plan's names with legal append-only transitions and dedup via `event_key` (`gaps.py:13-41`, `store.py:412-447`, `test_gaps.py:31-94`); no synthetic bars — a gap recovers only when its exact minute is returned (`recovery.py:180-187`); 28-day cutoff marks expired gaps `unrecoverable` with no futile provider calls (`gaps.py:298-330`, `test_gaps.py:124-136`, `test_offline_recovery.py:80-98`); oldest-first bounded tasks ≤7 days (`gaps.py:340-344`, `test_gaps.py:106-121`); provider-empty after three post-session empty overlaps with later recovery allowed and existing bars never deleted (`recovery.py:196-207`, `test_gaps.py:139-162`, `test_offline_recovery.py:190-217`); retention-422 → `unrecoverable`, throttled → stays `pending` (`recovery.py:188-195`, `test_offline_recovery.py:137-187`); interruption rollback with idempotent replay (`test_offline_recovery.py:101-134`); startup recovery resumes from the durable cursor without replaying closed time (`test_offline_recovery.py:220-248`); immutable universe activation with checksum conflict rejection and preserved history (`store.py:986-1047`, `test_gaps.py:165-179`); backfill is dry-run by default and creates no state (`cli.py:201-216`, `test_gaps.py:182-202`); `gaps` CLI is read-only via `open_reader` (`cli.py:252-277`, `test_gaps.py:205-227`); additive v3→v4 migration verified against a real v3 schema including preserved `provider_runtime_state` and `quick_check=ok` (`test_store.py:269-304`); Phase 3 cooldown/circuit/caps/single-writer invariants preserved because recovery goes through `DurableRequestPolicy` and one `WriterStore` (`recovery.py:77-107`); no secrets; Phase 4-only scope (no daemon, no cadence change); no overengineering beyond the plan's append-only gap/evidence design.
+
+Apply M1 (test-first) before relying on historical backfill or startup recovery through the free provider; optionally address L1–L5. No Phase 5 work is recommended or performed here.
