@@ -23,6 +23,7 @@ from bist_minute_collector.store import WriterStore
 ROOT = Path(__file__).resolve().parents[2]
 CALENDAR = ROOT / "config" / "calendars" / "bist" / "2026.json"
 UNIVERSE = ROOT / "config" / "universes" / "bist50" / "2026q3.json"
+UNIVERSE_100 = ROOT / "config" / "universes" / "bist100" / "2026q3.json"
 
 
 class NoNetworkProvider:
@@ -69,6 +70,19 @@ def test_closed_day_and_pre_close_runs_make_zero_provider_calls(tmp_path: Path) 
         assert latest is not None
         assert latest["status"] == DailyRunStatus.SKIPPED_PRE_CLOSE.value
         assert reader.integer_scalar("SELECT COUNT(*) FROM request_attempts") == 0
+
+
+def test_daily_runner_accepts_the_active_bist100_universe(tmp_path: Path) -> None:
+    calendar = BistCalendar(load_calendar_snapshot(CALENDAR))
+    universe = load_universe_snapshot(UNIVERSE_100)
+    runner = DailyOneShot(tmp_path, NoNetworkProvider(), calendar, universe)
+
+    report = asyncio.run(
+        runner.run(now_utc=datetime(2026, 8, 4, 16, 31, tzinfo=UTC), dry_run=True)
+    )
+
+    assert report.status is DailyRunStatus.DRY_RUN
+    assert report.planned_symbols == 100
 
 
 def test_daily_workflow_orders_reconcile_recovery_sweep_compaction_and_health(

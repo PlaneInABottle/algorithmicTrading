@@ -9,22 +9,26 @@ description = "Validated provider contracts for a bounded BIST minute-data resea
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "httpx>=0.28.1,<0.29",
+  "numpy>=2,<3",
+  "pandas>=2.2,<3",
   "pyarrow>=21,<26",
 ]
 
 [project.scripts]
 bist-minute-collector = "bist_minute_collector.cli:main"
+bist-backtest = "bist_backtest.cli:main"
 
 [dependency-groups]
 dev = [
   "mypy>=1.17,<2",
+  "pandas-stubs>=2.2,<3",
   "pytest>=8.4,<9",
   "pytest-cov>=6.2,<7",
   "ruff>=0.12,<0.13",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bist_minute_collector"]
+packages = ["src/bist_minute_collector", "src/bist_backtest"]
 
 [tool.pytest.ini_options]
 addopts = ["--strict-markers", "--strict-config"]

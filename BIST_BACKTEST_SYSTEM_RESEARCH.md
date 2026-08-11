@@ -817,3 +817,101 @@ The parallel sample/contract package is:
 Success means we can account for every input and explain every mismatch. It does **not** mean the event or strategy made money. Stop at that evidence package and review it before implementing the broader backfill or simulator.
 
 The same-session DeepSeek Flash confirmation is complete with **APPROVE**. No implementation begins unless and until Hermes/the user makes the explicit implementation decision to proceed.
+
+## 12. Implemented local backtest subsystem and BIST-100 extension (2026-08-08)
+
+This section records what was actually built and measured after the planning above, and the honest limits of that evidence. It does **not** claim a tradable edge.
+
+### 12.1 What exists now
+
+A deterministic intraday backtest engine lives in `src/bist_backtest/` with unit tests in
+`tests/unit/test_backtest_*`. It is a research tool, not a trading system:
+
+- **Loader** (`loader.py`) reads the collector's published Parquet partitions into per-symbol-day
+  frames. On 2026-08-08 it was made compaction-manifest aware: when the collector database exists, it
+  reads only the partitions the DB marks `active`, so superseded partitions from a previous
+  publication are ignored; synthetic test archives without a DB still work via the glob fallback.
+- **Features** (`features.py`) compute intraday primitives: opening-range high/low, first-window
+  return, VWAP, SMA fast/slow, Wilder RSI, volume average, plus a `PreviousSession` summary
+  (prior day's close/high/low) used by previous-day strategies.
+- **Engine** (`engine.py`) is a deterministic single-symbol event loop with next-bar fills,
+  configurable commission/slippage/half-spread costs, and forced session-close exits; it emits a
+  bar-by-bar ledger and a trades frame per simulation.
+- **Strategies** (`strategies.py`) register nine price-only decision rules: opening-range-breakout
+  (ORB), vwap-mean-reversion, intraday-momentum, intraday-reversal, sma-crossover, rsi-pullback,
+  previous-day-breakout, volume-breakout, and buy-and-hold. Each has adjustable parameters surfaced
+  through the CLI (`--param key=value`); feature-affecting parameters are plumbed into feature
+  computation (windows, SMA periods, RSI period), while decision-only parameters (thresholds, gaps,
+  volume multipliers) stay in the decision function.
+- **Runners** (`runners.py`) link each (symbol, session) to its prior session and run the strategy
+  plus an equal-weight buy-and-hold control under the same fill/cost model.
+- **Metrics** (`metrics.py`) aggregate across symbol-days: total return, profit factor,
+  expectancy-per-trade, hit rate, avg win/loss, annualized Sharpe and Sortino (from per-session
+  returns, sqrt-252), time exposure, max drawdown, forced closes, skipped entries. Values are plain
+  JSON-safe primitives (`NaN` is avoided and "no trade" runs do not crash).
+- **Report + ledger** (`report.py`, `ledger.py`) write a timestamped manifest per run recording
+  strategy, parameters, symbols, session dates, metrics, and the buy-and-hold benchmark, plus
+  trades/ledger CSVs, and append every attempt to `attempts.jsonl` for dedupe and audit.
+
+### 12.2 BIST-100 universe extension and backfill
+
+- The collector previously tracked the BIST 50 (`config/universes/bist50/2026q3.json`). On
+  2026-08-08 the official Borsa İstanbul constituent CSV
+  (`https://www.borsaistanbul.com/datum/hisse_endeks_ds.csv`, SHA-256
+  `6a106401971fecda68be710f51b450998f7763c09b7dccad080ce73a0d476b9d`) was retrieved with exactly 100
+  distinct XU100 constituents.
+- `config/universes/bist100/2026q3.json` is the new immutable 2026 Q3 snapshot: canonical
+  exchange-code SHA-256 `ef98a56775121529280541cee982db55e527204c516c5896868738401e1f0720`,
+  canonical Yahoo `.IS` SHA-256 `b12f9b20f3360a322deb6e7dfe97df2fcb6082b5f77b9293e76cba113538d5f6`,
+  and the same `.E → .IS` versioned alias rule as BIST 50. The collector's `UNIVERSE_PATH` now points
+  at it.
+- The 50 companies that are in BIST-100 but were not in BIST-50 had no archive history. They were
+  backfilled for the sessions 2026-08-03..2026-08-07 (two bounded batches of 25 symbols, 125 Yahoo
+  chart requests each, zero denied) and the archive was compacted. The archive now holds 100 symbols
+  × 5 sessions = 500 symbol-days. The remaining unresolved gaps (~14k per-minute slots) are partial
+  session-boundary minutes recorded truthfully as pending; they do not change the headline
+  coverage, and the loader reports per-symbol coverage for follow-up.
+
+### 12.3 First structured runs
+
+All nine strategies were run over the same five sessions (2026-08-03..2026-08-07) on three universe
+breadths — the original 10-symbol engineering list, the full 50, and the full 100 — with a common
+cost model (10 bps commission, 5 bps slippage, 1 bps half-spread, 100k starting equity). A small
+parameter sweep was run on the 100-universe set. Results live under `backtest-results/set10`,
+`set50`, `set100` (manifests + CSVs + `attempts.jsonl`).
+
+Headline 100-universe numbers (5 sessions, default parameters):
+
+| Strategy | Total return | Profit factor | Trades | Hit rate | Sharpe |
+|---|---|---|---|---|---|
+| buy-and-hold (control) | -0.11% | 0.90 | 500 | 46.6% | -0.63 |
+| opening-range-breakout | +0.02% | 1.05 | 283 | 45.2% | 0.19 |
+| intraday-momentum | +0.20% | 1.64 | 235 | 55.3% | 1.80 |
+| vwap-mean-reversion | -0.13% | 0.84 | 450 | 41.6% | -0.85 |
+| intraday-reversal | -0.40% | 0.41 | 230 | 31.7% | -3.57 |
+| sma-crossover | -5.38% | 0.15 | 8319 | 10.7% | -29.1 |
+| rsi-pullback | -0.72% | 0.28 | 1250 | 28.2% | -8.8 |
+| previous-day-breakout | -0.08% | 0.79 | 202 | 42.1% | -0.8 |
+| volume-breakout | +0.01% | 1.02 | 270 | 44.1% | 0.1 |
+
+Parameter sensitivity (100-universe; parameters genuinely change behavior — e.g. RSI
+`rsi_below=25` improved -0.72% → -0.42%, volume-breakout `volume_mult=3.0` improved +0.01% →
++0.04%). Full sweeps are recorded in the `set100` manifests.
+
+### 12.4 Honest limitations of these results
+
+- **Five sessions only** (a single trading week). The Sharpe/Sortino numbers are annualized from 5
+  observations and should not be read as stable.
+- **No corporate actions, dividends, or rights adjustments** and **no point-in-time membership**; the
+  universe is today's constituents (survivorship bias). The research policy in §7 stands.
+- **No market-impact or liquidity model** beyond a fixed half-spread; capacity is unbounded in the
+  sim and would not fill realistically at scale.
+- **Not statistically significant**: with ≤5 days, differences of a few bp are within noise, and
+  multiple-comparison risk applies across 9 strategies × 3 universes × a param sweep.
+- **Yahoo is an unofficial source** with no SLA; its one-minute window rolls after ~30 days, so this
+  evidence cannot be reproduced or extended further back from the live archive.
+
+These runs are engineering/exploratory evidence, matching the manifest `scope_note`. The next
+meaningful step — beyond this week's window, point-in-time membership, or event-based signals —
+still requires the data and acceptance work described in §9–§11.
+

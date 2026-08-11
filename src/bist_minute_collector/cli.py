@@ -33,7 +33,7 @@ from .snapshots import (
 from .store import SCHEMA_VERSION, StoreError, WriterStore
 
 ROOT = Path(__file__).resolve().parents[2]
-UNIVERSE_PATH = ROOT / "config" / "universes" / "bist50" / "2026q3.json"
+UNIVERSE_PATH = ROOT / "config" / "universes" / "bist100" / "2026q3.json"
 CALENDAR_PATH = ROOT / "config" / "calendars" / "bist" / "2026.json"
 DEFAULT_DATA_ROOT = Path.home() / ".local" / "share" / "bist-minute-collector" / "data"
 

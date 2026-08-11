@@ -57,7 +57,7 @@ class DailyRunReport:
     unresolved_gaps: int = 0
     partitions: int = 0
     quick_check: str | None = None
-    planned_symbols: int = 50
+    planned_symbols: int = 0
 
 
 RecoveryRunner = Callable[
@@ -205,8 +205,8 @@ class DailyOneShot:
             SymbolRoute(member.exchange_code, member.alias_for("yahoo_chart"))
             for member in universe.members
         )
-        if len(self.routes) != 50:
-            raise ValueError("the daily one-shot requires the immutable 50-symbol universe")
+        if not self.routes:
+            raise ValueError("the daily one-shot requires a non-empty immutable universe")
 
     async def run(self, *, now_utc: datetime, dry_run: bool = False) -> DailyRunReport:
         decision = decide_daily_run(self.calendar, now_utc)
@@ -216,6 +216,7 @@ class DailyOneShot:
                 DailyRunStatus.DRY_RUN,
                 decision.session_date,
                 decision.reason,
+                planned_symbols=len(self.routes),
             )
 
         run_id = uuid.uuid4().hex
@@ -253,6 +254,7 @@ class DailyOneShot:
                         decision.session_date,
                         decision.reason,
                         quick_check=quick_check,
+                        planned_symbols=len(self.routes),
                     )
 
                 assert decision.query_window is not None
@@ -323,6 +325,7 @@ class DailyOneShot:
                     unresolved_gaps=recovery.unresolved_gaps,
                     partitions=partitions,
                     quick_check=quick_check,
+                    planned_symbols=len(self.routes),
                 )
             except BaseException as error:
                 try:

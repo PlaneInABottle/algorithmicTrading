@@ -2,6 +2,16 @@
 
 Verification date: **2026-08-04 (Europe/Istanbul)**
 Status: **Phases 1–5 implemented, reviewed, and committed; the daily user timer is enabled/waiting and pre-close runtime acceptance passed**
+
+> **2026-08-08 amendment.** The active universe was extended from BIST 50 to BIST 100 following the
+> official process: the Borsa İstanbul constituent CSV was re-retrieved, `config/universes/bist100/2026q3.json`
+> was created as the new immutable 2026 Q3 snapshot (`bist100-2026q3-retrieved-2026-08-08`, 100 members,
+> canonical SHA-256s `ef98a567…` exchange / `b12f9b20…` Yahoo), and the collector's `UNIVERSE_PATH`
+> now points at it. The 50 constituents new to BIST-100 were backfilled for sessions 2026-08-03..08-07
+> (two bounded 25-symbol batches, 250 Yahoo requests total, zero denied) and the archive was compacted;
+> the backtest loader now reads only partitions the collector DB marks `active`. Every invariant in §3
+> (immutable snapshots, no unattended universe mutation, bounded recovery) still applies.
+
 Scope: current BIST 50 constituents, Yahoo one-minute data as a bounded free research source, and a provider-neutral path to licensed data later.
 
 This is the canonical implementation plan for the minute-data collector. It complements the broader [BIST backfill/backtest research](../../BIST_BACKTEST_SYSTEM_RESEARCH.md); it does not change that report's conclusions about data rights, historical depth, or evidentiary limits.

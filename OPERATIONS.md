@@ -9,7 +9,10 @@ completeness guarantee; the collector never fills, invents, or silently closes m
 - Timer: `bist-minute-collector.timer`, weekdays at 19:30 `Europe/Istanbul`, `Persistent=true`.
 - Process: `bist-minute-collector.service`, `Type=oneshot`; it normally becomes inactive after exit.
 - Data: `/home/mirza/.local/share/bist-minute-collector/data`.
-- Universe: immutable current 2026 Q3 BIST 50 snapshot in the repository.
+- Universe: immutable current 2026 Q3 BIST 100 snapshot (`config/universes/bist100/2026q3.json`),
+  effective 2026-07-01..2026-09-30 and retrieved from the official Borsa İstanbul constituent CSV on
+  2026-08-08. It superseded the BIST 50 snapshot on 2026-08-08. The database records which snapshot
+  was active (`universe_activations`).
 - Limits: maximum two Yahoo requests concurrently, one SQLite writer, persisted request caps and
   provider cooldowns, and a 28-day conservative recovery boundary.
 - Calendar: the repository's sourced calendar is authoritative. Verified closed dates exit zero with
@@ -41,6 +44,36 @@ uv run bist-minute-collector doctor --data-root /home/mirza/.local/share/bist-mi
 uv run bist-minute-collector gaps --data-root /home/mirza/.local/share/bist-minute-collector/data --json
 uv run bist-minute-collector run-once --data-root /home/mirza/.local/share/bist-minute-collector/data --dry-run
 ```
+
+Backfill and compaction (used 2026-08-08 to extend the archive from BIST 50 to BIST 100):
+
+```bash
+uv run bist-minute-collector backfill --data-root /home/mirza/.local/share/bist-minute-collector/data \
+  --symbols AKSA.IS,ALTNY.IS,... --from 2026-08-02T21:00:00Z --to 2026-08-07T15:30:00Z --dry-run
+uv run bist-minute-collector backfill --data-root /home/mirza/.local/share/bist-minute-collector/data \
+  --symbols ... --from 2026-08-02T21:00:00Z --to 2026-08-07T15:30:00Z --execute
+uv run bist-minute-collector compact --data-root /home/mirza/.local/share/bist-minute-collector/data
+```
+
+The `backfill` command validates symbols against the active universe snapshot (max 50 symbols per
+invocation — split into batches), plans bounded historical recovery with a `--dry-run` first, and
+only fetches when `--execute` is given. It also records the universe activation. `compact`
+reconciles and publishes pending writes; the backtest loader reads only partitions the collector
+DB marks `active`, so superseded partitions from a previous publication are ignored.
+
+Backtest subsystem (separate from the collector):
+
+```bash
+uv run bist-backtest run --data-root ~/.local/share/bist-minute-collector/data --strategy sma-crossover --all-symbols
+uv run bist-backtest run --data-root ~/.local/share/bist-minute-collector/data --strategy rsi-pullback \
+  --param rsi_below=25 --param exit_above=60 --force
+uv run bist-backtest attempts
+```
+
+Results and per-run manifests go to `backtest-results/`; each run also appends an entry to
+`backtest-results/attempts.jsonl` recording strategy, parameters, symbols, session dates, metrics,
+and the manifest path. The dedupe gate skips identical (strategy, params, symbols, sessions)
+combinations unless `--force` is passed.
 
 Disable future scheduled invocations without deleting data:
 
