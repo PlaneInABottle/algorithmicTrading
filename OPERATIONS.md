@@ -14,7 +14,9 @@ completeness guarantee; the collector never fills, invents, or silently closes m
   2026-08-08. It superseded the BIST 50 snapshot on 2026-08-08. The database records which snapshot
   was active (`universe_activations`).
 - Limits: maximum two Yahoo requests concurrently, one SQLite writer, persisted request caps and
-  provider cooldowns, and a 28-day conservative recovery boundary.
+  provider cooldowns, a 28-day conservative recovery boundary, a 50% systemd CPU quota, and a
+  45-minute start timeout. A full BIST 100 cycle used 14 minutes 11 seconds before the CPU quota;
+  the timeout allows the expected slower wall time without letting a stuck run overlap indefinitely.
 - Calendar: the repository's sourced calendar is authoritative. Verified closed dates exit zero with
   no Yahoo requests. A manual invocation before 19:30 also exits zero without a premature sweep.
 
