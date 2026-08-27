@@ -35,9 +35,9 @@ def test_rendered_service_and_timer_freeze_daily_oneshot_contract(tmp_path: Path
     timer = rendered[TIMER_NAME]
     assert "Type=oneshot" in service
     assert "Restart=" not in service
-    assert "TimeoutStartSec=45min" in service
+    assert "TimeoutStartSec=2h" in service
     assert "TimeoutStopSec=45s" in service
-    assert "CPUQuota=50%" in service
+    assert "CPUQuota=80%" in service
     assert "NoNewPrivileges=true" in service
     assert "ProtectSystem=strict" in service
     assert (
